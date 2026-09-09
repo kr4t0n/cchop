@@ -1,0 +1,52 @@
+{
+  "name": "cchop",
+  "version": "0.1.0",
+  "description": "A self-hosted Claude Code relay with one command to start the service and operations dashboard.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "bin": {
+    "cchop": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "AGENTS.md",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "workspaces": [
+    "web"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli.ts start",
+    "build": "npm run build:server && npm run build --workspace @cchop/web",
+    "build:server": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit && npm run typecheck --workspace @cchop/web",
+    "lint": "eslint .",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:package": "node --import tsx scripts/package-smoke.ts",
+    "test:browser": "node --import tsx scripts/browser-smoke.ts",
+    "check": "npm run lint && npm run typecheck && npm run build && npm test",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "commander": "15.0.0",
+    "undici": "8.10.2",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.13.3",
+    "eslint": "10.10.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.6",
+    "globals": "17.12.0",
+    "jiti": "2.7.0",
+    "tsx": "4.23.13",
+    "typescript": "6.0.2",
+    "typescript-eslint": "8.70.0"
+  }
+}
