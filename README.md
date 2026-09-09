@@ -184,9 +184,30 @@ For dashboard development, first build and start cchop, then run `npm run dev --
 
 Keep the version in the root and web package manifests, lockfile, `src/config.ts`, and the installed-version assertion in `scripts/package-smoke.ts` aligned. Update versioned installation examples when releasing a new version.
 
-Run `npm run check`, `npm run test:package`, and `npm run test:browser` before publishing. The package smoke check creates and tests the release tarball. Inspect it with `npm publish ./cchop-0.1.0.tgz --dry-run`, commit the release changes, then publish that same tarball with `npm publish ./cchop-0.1.0.tgz --access public` from an authenticated npm account. Substitute the new version in the tarball filename for later releases. Publishing requires explicit maintainer authorization; CI currently verifies changes without publishing.
+### GitHub Actions publishing
 
-Verify the registry version and tarball integrity, install the published version in a temporary prefix, and check `cchop --version`. Tag the released commit as `v<version>` and push the commit and tag to GitHub.
+The [Publish to npm workflow](.github/workflows/publish.yml) runs when a stable GitHub release is published. It checks out that release's tag, checks that `v<version>` matches the package and CLI versions, runs lint, types, builds, protocol/CLI tests, and package/browser smoke checks, then publishes the tested tarball with provenance. It verifies that npm serves the same artifact. Prereleases are skipped. Concurrent publishing runs are serialized.
+
+Configure the package's [npm trusted publisher](https://docs.npmjs.com/trusted-publishers/) once in [npm package settings](https://www.npmjs.com/package/cchop/access):
+
+| Setting | Value |
+| --- | --- |
+| Provider | GitHub Actions |
+| Organization or user | `kr4t0n` |
+| Repository | `cchop` |
+| Workflow filename | `publish.yml` |
+| Environment | Leave empty |
+| Allowed actions | Enable direct publishing with `npm publish` |
+
+The workflow uses GitHub-hosted runners and OIDC authentication. No `NPM_TOKEN` GitHub secret is needed. The pinned npm CLI supports trusted publishing. With npm 11.15 or newer, the same trust connection can be configured using `npm trust github cchop --repo kr4t0n/cchop --file publish.yml --allow-publish --yes`; npm may require browser verification.
+
+For each release, commit and push the version changes, wait for CI, create and push a `v<version>` tag on that commit, then publish its GitHub release. Publishing the GitHub release authorizes npm publication. Inspect the workflow result before announcing availability. Each release needs a new npm version; the published `0.1.0` cannot be reused. A failed workflow can be rerun after correcting authentication, provided its version has not already been published.
+
+Use **Actions → Publish to npm → Run workflow** to validate the selected ref without publishing. Manual runs execute all checks and a publish dry run; they do not exercise npm's OIDC publication authorization. Pushing a commit or tag alone does not publish a package.
+
+### Manual publishing fallback
+
+Run `npm run check`, `npm run test:package`, and `npm run test:browser`. The package smoke check creates and tests the release tarball. Inspect it with `npm publish ./cchop-<version>.tgz --dry-run`, commit the release changes, and publish that same tarball with `npm publish ./cchop-<version>.tgz --access public` from an authenticated npm account. Replace `<version>` with the release version. Verify the registry integrity and install the published version in a temporary prefix before announcing it. Publishing a GitHub release afterwards also triggers the workflow, which will fail when attempting to republish that existing version; prefer the automated path for normal releases.
 
 ## Project structure
 
@@ -201,5 +222,6 @@ Verify the registry version and tarball integrity, install the published version
 | `web/` | React/TypeScript/Tailwind operations dashboard |
 | `test/`, `scripts/` | Protocol/CLI tests and package/browser smoke checks |
 | `.github/workflows/ci.yml` | Application verification |
+| `.github/workflows/publish.yml` | Stable-release npm publishing and manual validation |
 
 The relay serves messages, token counting, models, and the connection-warming probe. Logs contain request metadata and sanitized capture/refresh diagnostics, never prompts, OAuth tokens, gateway keys, or `metadata.user_id`. Request history is bounded and in memory; restarting clears it. Dashboard credentials stay only in browser memory. No account pooling, credential sharing service, deployment manifests, or container packaging are included.

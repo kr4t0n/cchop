@@ -14,6 +14,7 @@ cchop is a global npm CLI implementing the source document's personal Claude Cod
 - `src/types.ts`, `src/metrics.ts`: bounded request metadata and dashboard status. `GET /api/status` requires `X-Cchop-Admin-Key`.
 - `web/`: React, TypeScript, Vite, and Tailwind operations dashboard, built into the npm package.
 - `test/`, `scripts/`: local protocol/credential/capture/CLI checks and foreground-supervised package/browser smoke checks. Never read actual user credentials or use real provider tokens in automated tests.
+- `.github/workflows/publish.yml`: validate a tagged stable GitHub release, publish the tested tarball to npm using OIDC and provenance, and verify registry integrity. Manual workflow dispatch performs validation and a dry run only.
 
 ## Required mechanism
 
@@ -32,8 +33,9 @@ cchop is a global npm CLI implementing the source document's personal Claude Cod
 - Run ESLint, type checks, build, and meaningful tests after changing code. Run package/browser checks when their paths or contracts change.
 - Update README and this architecture description with behavior and setup changes.
 - Package only compiled application assets and documentation. Keep `.env`, fingerprint.json, Claude credentials, local client settings, npm authentication, and local configuration out of git and package tarballs.
-- Publishing the npm package requires explicit user authorization.
-- Release versions are duplicated in the root/web package manifests, lockfile, `src/config.ts`, and the installed-version assertion in `scripts/package-smoke.ts`; keep them aligned. Publish the tarball validated by the package smoke check, then verify registry integrity and installation before tagging the release.
+- Publishing the npm package requires explicit user authorization. The release workflow treats publication of a stable GitHub release as authorization to publish its matching npm version; pushes and manual validation runs do not publish.
+- Release versions are duplicated in the root/web package manifests, lockfile, `src/config.ts`, and the installed-version assertion in `scripts/package-smoke.ts`; keep them aligned. Commit version changes, tag that commit, and publish its GitHub release to start automated checks and npm publication. Publish the tarball validated by the package smoke check and verify registry integrity before announcing availability.
+- npm trusted publishing must authorize `kr4t0n/cchop`, workflow filename `publish.yml`, no environment restriction, and direct `npm publish`. Use GitHub-hosted runners and a compatible npm CLI; no long-lived npm token is required. Keep the publish workflow self-contained so its OIDC workflow identity matches the configured filename.
 
 ## Gotchas and limits
 
@@ -47,6 +49,8 @@ cchop is a global npm CLI implementing the source document's personal Claude Cod
 - Mock protocol and rotation tests do not prove live subscription compatibility. Do not claim live validation unless it was actually performed with the operator's authorization.
 - Graceful shutdown has a deadline; remaining streams and OAuth network work are cancelled at that deadline. Once a rotated OAuth response has been validated, finish its atomic credential commit even during shutdown so rotation is not lost.
 - A locally installed tarball does not verify registry publication. Confirm the published version and artifact integrity before announcing a release.
+- Manual publish-workflow runs validate packaging without exercising OIDC publication. Prereleases are skipped; stable releases require a new `v<version>` tag matching the manifests and CLI. A rerun after successful npm publication cannot overwrite that version.
+- npm 11 rejects an already-published version even in a publish dry run. The preview step uses `--dry-run --force` so the current version remains testable; the real publication step must never use `--force`.
 
 ## Planned improvements
 

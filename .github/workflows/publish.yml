@@ -1,0 +1,102 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'kr4t0n/cchop' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.18.0'
+          registry-url: https://registry.npmjs.org
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.19.1 --ignore-scripts
+      - run: npm ci
+      - name: Validate release version
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { appendFileSync, readFileSync } from 'node:fs';
+          import { VERSION } from './src/config.ts';
+
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+          const web = JSON.parse(readFileSync('web/package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          assert.equal(manifest.name, 'cchop');
+          assert.match(manifest.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+          assert.equal(VERSION, manifest.version, 'CLI version must match the package');
+          assert.equal(web.version, manifest.version, 'Dashboard version must match the package');
+          assert.equal(lock.version, manifest.version, 'Lockfile version must match the package');
+          assert.equal(lock.packages[''].version, manifest.version);
+          assert.equal(lock.packages.web.version, manifest.version);
+          if (process.env.GITHUB_EVENT_NAME === 'release') {
+            assert.equal(process.env.RELEASE_TAG, `v${manifest.version}`, 'Release tag must match the package version');
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `tarball=cchop-${manifest.version}.tgz\n`);
+          NODE
+      - run: npm run check
+      - run: npm run test:package
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - name: Preview the tested tarball
+        env:
+          RELEASE_TARBALL: ${{ steps.release.outputs.tarball }}
+        # npm also checks duplicate versions in dry runs. Allow previews of the
+        # current published version; the real publish below never uses --force.
+        run: npm publish "./$RELEASE_TARBALL" --dry-run --force --access public
+      - name: Publish the tested tarball with provenance
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TARBALL: ${{ steps.release.outputs.tarball }}
+        run: npm publish "./$RELEASE_TARBALL" --access public --provenance
+      - name: Verify registry artifact
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TARBALL: ${{ steps.release.outputs.tarball }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { createHash } from 'node:crypto';
+          import { readFileSync } from 'node:fs';
+          import { setTimeout } from 'node:timers/promises';
+
+          const { name, version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const integrity = `sha512-${createHash('sha512').update(readFileSync(process.env.RELEASE_TARBALL)).digest('base64')}`;
+          for (let attempt = 0; attempt < 6; attempt += 1) {
+            const response = await fetch(`https://registry.npmjs.org/${name}/${version}`, { signal: AbortSignal.timeout(15000) });
+            if (response.status === 404 && attempt < 5) {
+              await response.body?.cancel();
+              await setTimeout(5000);
+              continue;
+            }
+            assert.equal(response.status, 200, 'Published package must be readable from npm');
+            const published = await response.json();
+            assert.equal(published.version, version);
+            assert.equal(published.dist.integrity, integrity, 'Published tarball must match the tested artifact');
+            console.log(`Verified ${name}@${version}: registry integrity matches the tested tarball.`);
+            break;
+          }
+          NODE
