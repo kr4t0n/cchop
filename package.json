@@ -4,6 +4,18 @@
   "description": "A self-hosted Claude Code relay with one command to start the service and operations dashboard.",
   "type": "module",
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kr4t0n/cchop.git"
+  },
+  "homepage": "https://github.com/kr4t0n/cchop#readme",
+  "bugs": {
+    "url": "https://github.com/kr4t0n/cchop/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "bin": {
     "cchop": "dist/cli.js"
   },

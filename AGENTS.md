@@ -33,6 +33,7 @@ cchop is a global npm CLI implementing the source document's personal Claude Cod
 - Update README and this architecture description with behavior and setup changes.
 - Package only compiled application assets and documentation. Keep `.env`, fingerprint.json, Claude credentials, local client settings, npm authentication, and local configuration out of git and package tarballs.
 - Publishing the npm package requires explicit user authorization.
+- Release versions are duplicated in the root/web package manifests, lockfile, `src/config.ts`, and the installed-version assertion in `scripts/package-smoke.ts`; keep them aligned. Publish the tarball validated by the package smoke check, then verify registry integrity and installation before tagging the release.
 
 ## Gotchas and limits
 
@@ -45,7 +46,7 @@ cchop is a global npm CLI implementing the source document's personal Claude Cod
 - A configured base URL does not control every Claude Code network endpoint; login and auxiliary features may use other routes.
 - Mock protocol and rotation tests do not prove live subscription compatibility. Do not claim live validation unless it was actually performed with the operator's authorization.
 - Graceful shutdown has a deadline; remaining streams and OAuth network work are cancelled at that deadline. Once a rotated OAuth response has been validated, finish its atomic credential commit even during shutdown so rotation is not lost.
-- A locally installed tarball is not a published package, and the npm name is not reserved.
+- A locally installed tarball does not verify registry publication. Confirm the published version and artifact integrity before announcing a release.
 
 ## Planned improvements
 

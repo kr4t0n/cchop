@@ -8,7 +8,14 @@ The local client holds only the relay URL and shared relay key. Subscription cre
 
 Requires Node.js **22.19 or newer** and npm. Capture also requires an installed, logged-in Claude Code client on the relay host. The document uses the Linux credential file; cchop requires that file format and does not read the macOS Keychain.
 
-The package has not been published. From this checkout:
+Install the CLI and bundled dashboard from npm:
+
+```bash
+npm install -g cchop
+cchop --version
+```
+
+Installation does not start services or modify Claude credentials. To install from a source checkout instead:
 
 ```bash
 npm ci
@@ -16,8 +23,6 @@ npm run check
 npm pack
 npm install -g ./cchop-0.1.0.tgz
 ```
-
-After publication, installation will be `npm install -g cchop`. Installation does not start services or modify Claude credentials.
 
 ## First-time setup on the relay host
 
@@ -174,6 +179,14 @@ npm run test:browser
 All automated checks use temporary fake fingerprints, generated test credentials, and loopback API/OAuth servers. They do not read the operator's credential store or make real subscription requests. Successful mock checks establish implementation behavior; live remote login, capture, and provider compatibility still require operator validation. Tests supervise and close their temporary services in the foreground. CI runs lint, types, tests, builds, package checks, and browser checks.
 
 For dashboard development, first build and start cchop, then run `npm run dev --workspace @cchop/web` in another terminal. Vite forwards `/api` to the default local admin port.
+
+## Releasing
+
+Keep the version in the root and web package manifests, lockfile, `src/config.ts`, and the installed-version assertion in `scripts/package-smoke.ts` aligned. Update versioned installation examples when releasing a new version.
+
+Run `npm run check`, `npm run test:package`, and `npm run test:browser` before publishing. The package smoke check creates and tests the release tarball. Inspect it with `npm publish ./cchop-0.1.0.tgz --dry-run`, commit the release changes, then publish that same tarball with `npm publish ./cchop-0.1.0.tgz --access public` from an authenticated npm account. Substitute the new version in the tarball filename for later releases. Publishing requires explicit maintainer authorization; CI currently verifies changes without publishing.
+
+Verify the registry version and tarball integrity, install the published version in a temporary prefix, and check `cchop --version`. Tag the released commit as `v<version>` and push the commit and tag to GitHub.
 
 ## Project structure
 
