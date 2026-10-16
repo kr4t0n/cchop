@@ -185,7 +185,7 @@ export async function startCapture(config: RuntimeConfig, options: {
       if (url.pathname === '/v1/messages') {
         let fingerprint: Fingerprint;
         try { fingerprint = createFingerprint(req.headers, body!); }
-        catch { throw new CaptureRequestError(400, 'Capture requires valid JSON, metadata.user_id, and a Claude Code user-agent.'); }
+        catch { throw new CaptureRequestError(400, 'Capture requires a user-agent and JSON metadata.user_id containing device_id and account_uuid, with matching session IDs when both are present. Use a current Claude Code client.'); }
         // Reserve synchronously before saving: simultaneous valid requests cannot replace each other.
         if (reserved) throw new CaptureRequestError(409, 'A request has already been selected for this capture.');
         reserved = true;

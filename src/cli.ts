@@ -46,7 +46,7 @@ program.command('capture')
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
     try {
-      process.stdout.write(`Capture listening: http://127.0.0.1:${capture.port}\nIn another terminal on this relay host, use the logged-in remote Claude Code client:\n\n  env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_BASE_URL=http://127.0.0.1:${capture.port} claude\n\nSend a short message, then exit that Claude Code session. cchop saves only reusable headers and metadata.user_id; credentials and prompts are excluded.\n`);
+      process.stdout.write(`Capture listening: http://127.0.0.1:${capture.port}\nIn another terminal on this relay host, use the logged-in remote Claude Code client:\n\n  env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_BASE_URL=http://127.0.0.1:${capture.port} claude\n\nSend a short message, then exit that Claude Code session. cchop saves reusable headers and the device_id/account_uuid from metadata.user_id; credentials, prompts, session IDs, and per-request headers are excluded.\n`);
       await capture.completed;
       if (captured) {
         process.stdout.write(`Captured remote fingerprint: ${config.fingerprintPath}\nStop the remote Claude Code client before cchop start; only the relay should refresh its credentials.\n`);

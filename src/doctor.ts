@@ -4,7 +4,7 @@ import { connect } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { localUrl, type RuntimeConfig } from './config.js';
 import { readCredentials, CredentialError } from './credentials.js';
-import { loadFingerprint, runtimeWarning } from './fingerprint.js';
+import { FingerprintError, loadFingerprint, runtimeWarning } from './fingerprint.js';
 
 interface Check { name: string; status: 'ok' | 'warn' | 'error'; message: string }
 
@@ -25,8 +25,9 @@ export async function runDoctor(config: RuntimeConfig, offline: boolean): Promis
     checks.push({ name: 'fingerprint', status: 'ok', message: `Captured ${fingerprint.capturedAt}.` });
     const warning = runtimeWarning(fingerprint);
     checks.push({ name: 'capture runtime', status: warning ? 'warn' : 'ok', message: warning ?? 'Capture and relay Node major versions match; this does not verify TLS fingerprint equivalence.' });
-  } catch {
-    checks.push({ name: 'fingerprint', status: 'error', message: 'A valid remote fingerprint is required. Run cchop capture on the relay host.' });
+  } catch (error) {
+    checks.push({ name: 'fingerprint', status: 'error', message: error instanceof FingerprintError
+      ? error.message : 'A valid remote fingerprint is required. Run cchop capture on the relay host.' });
   }
   try {
     const credentials = await readCredentials(config.claudeCredentialsPath);

@@ -58,11 +58,17 @@ This listens only on `127.0.0.1:9999` and prints a command to run in a second te
 env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_BASE_URL=http://127.0.0.1:9999 claude
 ```
 
-Send a short message. Capture records the first valid `/v1/messages` request's reusable headers, complete `metadata.user_id`, timestamp, and capture process Node version. It excludes authorization, cookies, transport headers, and the prompt body. The original request is forwarded upstream with its original OAuth authorization and its response streams back unchanged. Capture exits after that exchange. An upstream failure is reported even if the fingerprint was saved.
+Send a short message. Capture records the first valid `/v1/messages` request's reusable headers, device/account identity, timestamp, and capture process Node version in fingerprint format `schemaVersion: 2`. It parses the JSON string in `metadata.user_id` and stores only `device_id` and `account_uuid` in the fingerprint's `identity` object.
+
+The device ID must be a nonempty string; the account UUID must be a string and may be empty, as emitted by clients without a cached account profile. Use a current Claude Code client; opaque legacy user IDs, malformed identities, and conflicting session IDs are rejected before forwarding. When both are present, `x-claude-code-session-id` must match `metadata.user_id.session_id`.
+
+Capture excludes authorization, cookies, transport headers, the prompt body, other user-ID fields, and every `x-claude-code-*` header. The original request is forwarded upstream with its original OAuth authorization and per-request headers, and its response streams back unchanged. Capture exits after that exchange. An upstream failure is reported even if the fingerprint was saved.
 
 Exit the remote Claude Code session before starting the relay. Once the relay is running, it must be the only process refreshing that credential file. Use one person, one subscription, and one relay instance, as prescribed by the document.
 
 After upgrading the remote Claude Code installation, stop the relay and repeat `cchop capture --replace`. Replacement is atomic. Capture never overwrites an existing fingerprint unless `--replace` is given. Align the relay's Node major version with capture; startup and diagnostics warn when they differ. This version check does not establish TLS fingerprint equivalence.
+
+Existing unversioned and version-1 fingerprints require recapture. `cchop start` rejects unsupported fingerprint formats, and `cchop doctor --offline` reports the same migration instructions. Stop the relay, run `cchop capture --replace` with a current remote Claude Code client, exit that client, then run `cchop doctor --offline` before restarting. Do not change an old fingerprint's version by hand: a fresh capture extracts the device/account fields and excludes session and request correlation data.
 
 ## Start and connect
 
@@ -93,7 +99,7 @@ The settings file is owner-only and is never silently overwritten. Existing Clau
 ```mermaid
 flowchart LR
     Client[Local Claude Code] -->|Request + relay bearer key| Auth[Verify relay key]
-    Auth -->|Accepted request| Rewrite[Replace captured headers<br/>and metadata.user_id]
+    Auth -->|Accepted request| Rewrite[Apply captured headers<br/>and device/account fields]
     Capture[Remote capture] -->|Fingerprint| Rewrite
     Credentials[Remote credential file] -->|Current OAuth token| Rewrite
     Rewrite -->|Rewritten request + OAuth| API[Anthropic API]
@@ -101,12 +107,12 @@ flowchart LR
 ```
 
 1. Compare the incoming bearer key using SHA-256 and constant-time comparison. Reject invalid or duplicate authentication headers before reading credentials or contacting the provider.
-2. Strip local `user-agent`, `x-app`, `anthropic-version`, `anthropic-beta`, `sec-fetch-mode`, all `x-stainless-*`, provider credentials, gateway headers, and hop-by-hop/forwarding headers. Apply the captured reusable headers.
-3. Replace `metadata.user_id` with the captured complete value when a metadata object exists. Preserve other JSON fields. Invalid JSON, invalid metadata, and compressed request bodies are rejected; content length is recalculated from the rewritten bytes.
+2. Strip local `user-agent`, `x-app`, `anthropic-version`, `anthropic-beta`, `sec-fetch-mode`, all `x-stainless-*`, provider credentials, gateway headers, and hop-by-hop/forwarding headers. Apply the captured reusable headers. Pass through the client's `x-claude-code-session-id`, `x-claude-code-agent-id`, `x-claude-code-parent-agent-id`, and `x-claude-code-prompt-id` when present; absent headers stay absent. Other `x-claude-code-*` request hints, including request class, agent type, compaction state, and tool durations, also pass through from the current request. None are replayed from the capture.
+3. When `metadata.user_id` exists, parse its JSON-encoded object, replace only `device_id` and `account_uuid` with captured values, and serialize it back to a string. Preserve the client's `session_id`, every other user-ID field, and the rest of the request. Missing metadata or a missing user ID stays absent. Session header/body values must match when both exist; malformed identities and conflicting sessions return **400** before credential refresh or inference. Invalid JSON, invalid metadata, and compressed request bodies are rejected; content length is recalculated from the rewritten bytes.
 4. Read the remote credential file for every request. Within five minutes of expiry, refresh through the configured token endpoint. One in-process promise serializes refreshes. Persist both newly returned tokens and expiry through an owner-only temporary file and atomic rename, preserving other credential metadata. A failed refresh or persistence returns **503**, without forwarding an inference request or returning an unpersisted access token.
 5. Send the rewritten request with the remote OAuth bearer token using Node.js and undici. Stream the response with backpressure. Client disconnection cancels upstream work. Inference requests are never automatically retried; redirects are rejected.
 
-This deliberately follows the document's captured headers and fixed captured session identity, including its trade-off: changes in the local client's capability headers are not merged into the recorded fingerprint. Re-capture after remote client upgrades. cchop does not claim that rewriting identity prevents account enforcement or proves equivalence with the remote client's TLS handshake.
+Device/account identity comes from capture; session and execution correlation remain with the current client. No session mapping state is needed, so distinct sessions stay distinct and resumed sessions keep their IDs across relay restarts. Captured capability headers remain fixed: changes in the local client's capability headers are not merged into the recorded fingerprint. Re-capture after remote client upgrades. cchop does not claim that rewriting identity prevents account enforcement or proves equivalence with the remote client's TLS handshake.
 
 ## Commands
 
@@ -215,6 +221,7 @@ Run `npm run check`, `npm run test:package`, and `npm run test:browser`. The pac
 | --- | --- |
 | `src/cli.ts`, `src/config.ts`, `src/doctor.ts` | Commands, configuration, diagnostics |
 | `src/capture.ts`, `src/fingerprint.ts` | Loopback capture and private fingerprint persistence |
+| `src/identity.ts` | Device/account schema, nested identity parsing, and session consistency validation |
 | `src/rewriter.ts` | Captured identity substitution |
 | `src/credentials.ts` | Disk-backed OAuth credentials, serialized refresh, atomic rotation |
 | `src/server.ts`, `src/security.ts` | Relay transport, listener isolation, authentication, header filtering |

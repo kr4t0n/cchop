@@ -187,7 +187,7 @@ export async function startApplication(config: RuntimeConfig, options: {
     try {
       const rawBody = method === 'POST' ? await readBody(req, config.maxRequestBytes) : undefined;
       record.bytesIn = rawBody?.length ?? 0;
-      const body = rawBody === undefined ? undefined : rewriteBody(rawBody, fingerprint.metadataUserId);
+      const body = rawBody === undefined ? undefined : rewriteBody(rawBody, fingerprint.identity, req.headers['x-claude-code-session-id']);
       if (body && body.length > config.maxRequestBytes) throw new HttpError(413, 'Rewritten request body exceeds the configured limit.');
       const accessToken = await credentials.getAccessToken();
       controller.signal.throwIfAborted();

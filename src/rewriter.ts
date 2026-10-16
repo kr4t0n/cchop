@@ -1,5 +1,6 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Fingerprint } from './fingerprint.js';
+import { IdentityError, parseMetadataUserId, type CapturedIdentity } from './identity.js';
 import { forwardHeaders } from './security.js';
 
 const identityHeaders = new Set([
@@ -19,7 +20,7 @@ export function rewriteHeaders(incoming: IncomingHttpHeaders, fingerprint: Finge
   return headers;
 }
 
-export function rewriteBody(raw: Buffer, metadataUserId: string): Buffer {
+export function rewriteBody(raw: Buffer, capturedIdentity: CapturedIdentity, sessionHeader?: string | string[]): Buffer {
   let body: unknown;
   try { body = JSON.parse(raw.toString('utf8')); }
   catch { throw new RewriteError('Request body must be valid JSON.'); }
@@ -28,7 +29,16 @@ export function rewriteBody(raw: Buffer, metadataUserId: string): Buffer {
     if (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata)) {
       throw new RewriteError('Request metadata must be a JSON object.');
     }
-    Object.assign(body.metadata, { user_id: metadataUserId });
+    if ('user_id' in body.metadata) {
+      let identity: Record<string, unknown>;
+      try { identity = parseMetadataUserId(body.metadata.user_id, sessionHeader); }
+      catch (error) {
+        throw new RewriteError(error instanceof IdentityError ? error.message : 'Invalid metadata.user_id.');
+      }
+      identity.device_id = capturedIdentity.device_id;
+      identity.account_uuid = capturedIdentity.account_uuid;
+      body.metadata.user_id = JSON.stringify(identity);
+    }
   }
   return Buffer.from(JSON.stringify(body), 'utf8');
 }

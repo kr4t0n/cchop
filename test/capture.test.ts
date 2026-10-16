@@ -11,7 +11,17 @@ import { configSchema, type RuntimeConfig } from '../src/config.js';
 import { loadFingerprint, type Fingerprint } from '../src/fingerprint.js';
 
 const secret = () => randomBytes(32).toString('base64url');
-const messages = '{ "model": "test-model", "metadata": { "user_id": "remote-user-and-session" }, "messages": [{ "role": "user", "content": "private-prompt" }] }';
+const remoteSession = 'remote-session';
+const remoteIdentity = { device_id: 'remote-device', account_uuid: 'remote-account' };
+const remoteUserId = JSON.stringify({ ...remoteIdentity, session_id: remoteSession, future_field: 'capture-only-metadata' });
+const messages = `{ "model": "test-model", "metadata": { "user_id": ${JSON.stringify(remoteUserId)} }, "messages": [{ "role": "user", "content": "private-prompt" }] }`;
+const requestHeaders = {
+  'x-claude-code-agent-id': 'capture-agent', 'x-claude-code-parent-agent-id': 'capture-parent',
+  'x-claude-code-prompt-id': 'capture-prompt', 'x-claude-code-request-class': 'subagent',
+  'x-claude-code-agent-type': 'Explore', 'x-claude-code-compaction': 'auto',
+  'x-claude-code-context-compacted': 'manual', 'x-claude-code-prev-tool-durations': 'Read=15',
+  'x-claude-code-future-hint': 'capture-only',
+};
 
 async function fixture(t: TestContext, handler: (req: IncomingMessage, res: ServerResponse) => void,
   overrides: Partial<RuntimeConfig> = {}) {
@@ -42,6 +52,7 @@ async function fixture(t: TestContext, handler: (req: IncomingMessage, res: Serv
   const auth = {
     authorization: `Bearer ${secret()}`, 'content-type': 'application/json',
     'user-agent': 'claude-cli/test (external, cli)',
+    'x-claude-code-session-id': remoteSession,
   };
   return { config, start, auth };
 }
@@ -90,7 +101,7 @@ test('capture stores only remote identity while forwarding original OAuth, body 
     const req = httpRequest(`${base}/v1/messages?beta=true`, {
       method: 'POST', signal: AbortSignal.timeout(5000),
       headers: {
-        ...f.auth, 'x-api-key': secret(), cookie: `session=${cookie}`,
+        ...f.auth, ...requestHeaders, 'x-api-key': secret(), cookie: `session=${cookie}`,
         'anthropic-beta': 'oauth-feature,future-feature', 'anthropic-version': '2023-06-01',
         'x-stainless-runtime': 'node', 'x-stainless-runtime-version': process.version,
         'x-future-identity': 'preserve-this', 'x-cchop-key': f.config.gatewayToken,
@@ -113,13 +124,18 @@ test('capture stores only remote identity while forwarding original OAuth, body 
   assert.equal(incoming?.headers['user-agent'], f.auth['user-agent']);
   assert.equal(incoming?.headers['anthropic-beta'], 'oauth-feature,future-feature');
   assert.equal(incoming?.headers['x-future-identity'], 'preserve-this');
+  for (const [name, value] of Object.entries(requestHeaders)) assert.equal(incoming?.headers[name], value);
   for (const name of ['x-cchop-key', 'x-cchop-admin-key', 'x-forwarded-for', 'x-real-ip', 'x-transport-only']) {
     assert.equal(incoming?.headers[name], undefined);
   }
   const serialized = await readFile(f.config.fingerprintPath, 'utf8');
   const fingerprint = await loadFingerprint(f.config.fingerprintPath);
   assert.deepEqual(fingerprint, selected);
-  assert.equal(fingerprint.metadataUserId, 'remote-user-and-session');
+  assert.equal(fingerprint.schemaVersion, 2);
+  assert.deepEqual(fingerprint.identity, remoteIdentity);
+  assert.equal(fingerprint.headers['x-claude-code-session-id'], undefined);
+  for (const name of Object.keys(requestHeaders)) assert.equal(fingerprint.headers[name], undefined);
+  for (const value of [remoteSession, 'capture-agent', 'capture-parent', 'capture-prompt', 'capture-only', 'capture-only-metadata']) assert.equal(serialized.includes(value), false);
   assert.equal(fingerprint.nodeVersion, process.version);
   assert.equal(fingerprint.headers['x-stainless-runtime-version'], process.version);
   assert.equal(fingerprint.headers['anthropic-beta'], 'oauth-feature,future-feature');
@@ -157,7 +173,7 @@ test('capture preserves existing files unless replaced and rejects concurrent or
   await reader.read();
   const before = await readFile(f.config.fingerprintPath, 'utf8');
   const second = await send(base, '/v1/messages', {
-    headers: f.auth, body: messages.replace('remote-user-and-session', 'second-identity'),
+    headers: f.auth, body: messages.replace('remote-device', 'second-device'),
   });
   assert.equal(second.status, 409);
   assert.equal(await readFile(f.config.fingerprintPath, 'utf8'), before);
@@ -191,11 +207,18 @@ test('capture rejects invalid identity, credentials, routes, methods, origins, a
   await check(400, '/v1/messages', { headers: f.auth, body: '{malformed' });
   await check(400, '/v1/messages', { headers: f.auth, body: '{"metadata":{"user_id":""}}' });
   await check(400, '/v1/messages', { headers: f.auth, body: '{"messages":[]}' });
+  const withoutSession: OutgoingHttpHeaders = { ...f.auth };
+  delete withoutSession['x-claude-code-session-id'];
+  await check(400, '/v1/messages', { headers: { ...f.auth, 'x-claude-code-session-id': 'different-session' }, body: messages });
+  for (const identity of ['legacy-opaque-id', '{}', '[]', 'null', '{invalid', '{"session_id":42}', '{"session_id":""}',
+    '{"device_id":"device"}', '{"device_id":"","account_uuid":"account"}', '{"device_id":"device","account_uuid":42}']) {
+    await check(400, '/v1/messages', { headers: f.auth, body: JSON.stringify({ metadata: { user_id: identity } }) });
+  }
   await check(400, '/v1/messages', { headers: { authorization: f.auth.authorization, 'content-type': 'application/json' }, body: messages });
   assert.equal(calls, 0);
   assert.equal(capture.exchange, null);
   await assert.rejects(readFile(f.config.fingerprintPath), { code: 'ENOENT' });
-  assert.equal((await send(base, '/v1/messages', { headers: f.auth, body: messages })).status, 200);
+  assert.equal((await send(base, '/v1/messages', { headers: withoutSession, body: messages })).status, 200);
   await capture.completed;
   assert.equal(calls, 1);
 });
@@ -222,7 +245,7 @@ test('warmup, model listing, and token counting do not consume the messages capt
   assert.deepEqual(bodies, ['', '{"messages":[],"future_field":true}']);
   assert.equal((await send(base, '/v1/messages', { headers: f.auth, body: messages })).status, 200);
   await capture.completed;
-  assert.equal((await loadFingerprint(f.config.fingerprintPath)).metadataUserId, 'remote-user-and-session');
+  assert.deepEqual((await loadFingerprint(f.config.fingerprintPath)).identity, remoteIdentity);
 });
 
 test('capture retains valid fingerprints on provider errors and never follows redirects or retries', { timeout: 10000 }, async (t) => {
@@ -242,7 +265,7 @@ test('capture retains valid fingerprints on provider errors and never follows re
       await capture.completed;
       assert.equal(calls, 1);
       assert.equal(capture.exchange?.upstreamStatus, status);
-      assert.equal((await loadFingerprint(f.config.fingerprintPath)).metadataUserId, 'remote-user-and-session');
+      assert.deepEqual((await loadFingerprint(f.config.fingerprintPath)).identity, remoteIdentity);
       if (status === 429) {
         assert.equal(response.status, 429);
         assert.equal(response.headers['retry-after'], '30');

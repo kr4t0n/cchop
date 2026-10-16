@@ -3,24 +3,29 @@ import { link, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promi
 import { validateHeaderName, validateHeaderValue, type IncomingHttpHeaders } from 'node:http';
 import { dirname } from 'node:path';
 import { z } from 'zod';
+import { capturedIdentitySchema, isRequestScopedHeader, parseMetadataUserId, SESSION_ID_HEADER } from './identity.js';
 import { forwardHeaders } from './security.js';
 
+export const FINGERPRINT_SCHEMA_VERSION = 2;
+
 const fingerprintSchema = z.object({
+  schemaVersion: z.literal(FINGERPRINT_SCHEMA_VERSION),
   capturedAt: z.iso.datetime(),
   nodeVersion: z.string().regex(/^v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/),
   headers: z.record(z.string().min(1).max(256), z.string().max(16384)),
-  metadataUserId: z.string().min(1).max(8192).regex(/^[^\x00-\x1f\x7f]+$/),
+  identity: capturedIdentitySchema,
 }).strict();
 
 export type Fingerprint = z.infer<typeof fingerprintSchema>;
 export class FingerprintError extends Error {}
 
-// Credentials and transport metadata are never part of a reusable identity.
+// Credentials, transport metadata, and per-request hints are not reusable identity.
 function captureHeaders(incoming: IncomingHttpHeaders): Record<string, string> {
   const filtered = forwardHeaders(incoming);
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(filtered)) {
-    if (['authorization', 'x-api-key', 'cookie', 'set-cookie', 'content-encoding'].includes(key)) continue;
+    if (['authorization', 'x-api-key', 'cookie', 'set-cookie', 'content-encoding'].includes(key)
+      || isRequestScopedHeader(key)) continue;
     if (typeof value !== 'string') throw new FingerprintError('Capture requires single-valued HTTP headers.');
     try { validateHeaderName(key); validateHeaderValue(key, value); }
     catch { throw new FingerprintError('Fingerprint contains invalid HTTP headers.'); }
@@ -30,12 +35,16 @@ function captureHeaders(incoming: IncomingHttpHeaders): Record<string, string> {
 }
 
 function validateFingerprint(value: unknown): Fingerprint {
+  if (value && typeof value === 'object' && !Array.isArray(value)
+    && (!('schemaVersion' in value) || value.schemaVersion !== FINGERPRINT_SCHEMA_VERSION)) {
+    throw new FingerprintError('Unsupported fingerprint format. Stop the relay and run cchop capture --replace with a current Claude Code client.');
+  }
   const parsed = fingerprintSchema.safeParse(value);
-  if (!parsed.success) throw new FingerprintError('Fingerprint is invalid. Run cchop capture with the remote Claude Code client.');
+  if (!parsed.success) throw new FingerprintError('Fingerprint is invalid. Stop the relay and run cchop capture --replace with the remote Claude Code client.');
   const headers = captureHeaders(parsed.data.headers);
   if (!headers['user-agent'] || Object.keys(headers).length !== Object.keys(parsed.data.headers).length
     || Object.keys(parsed.data.headers).some((key) => key !== key.toLowerCase())) {
-    throw new FingerprintError('Fingerprint must contain a user-agent and no credentials or transport headers. Recapture it.');
+    throw new FingerprintError('Fingerprint must contain a user-agent and no credentials, transport headers, or per-request headers. Stop the relay and run cchop capture --replace.');
   }
   return { ...parsed.data, headers };
 }
@@ -49,9 +58,13 @@ export function createFingerprint(headers: IncomingHttpHeaders, rawBody: Buffer)
     || !('user_id' in body.metadata)) {
     throw new FingerprintError('Capture requires the remote Claude Code metadata.user_id.');
   }
+  let identity: Record<string, unknown>;
+  try { identity = parseMetadataUserId(body.metadata.user_id, headers[SESSION_ID_HEADER]); }
+  catch { throw new FingerprintError('Capture requires JSON metadata.user_id with consistent session IDs. Use a current Claude Code client.'); }
   return validateFingerprint({
+    schemaVersion: FINGERPRINT_SCHEMA_VERSION,
     capturedAt: new Date().toISOString(), nodeVersion: process.version,
-    headers: captureHeaders(headers), metadataUserId: body.metadata.user_id,
+    headers: captureHeaders(headers), identity: { device_id: identity.device_id, account_uuid: identity.account_uuid },
   });
 }
 

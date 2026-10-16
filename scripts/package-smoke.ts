@@ -14,7 +14,10 @@ const prefix = join(directory, 'install');
 const configPath = join(directory, 'config', 'cchop.json');
 const claudeCredentialsPath = join(directory, 'mock-claude-credentials.json');
 const remoteOauth = { accessToken: randomBytes(32).toString('base64url'), refreshToken: randomBytes(32).toString('base64url'), expiresAt: Date.now() + 3600000 };
-const remoteUserId = 'package-smoke-remote-identity';
+const remoteSessionId = 'package-smoke-session';
+const remoteIdentity = { device_id: 'package-smoke-device', account_uuid: 'package-smoke-account' };
+const remoteUserId = JSON.stringify({ ...remoteIdentity, session_id: remoteSessionId });
+const localIdentity = { device_id: 'local-device', account_uuid: 'local-account', session_id: 'local-session', future_field: { preserved: true } };
 const remoteUserAgent = 'claude-cli/package-smoke';
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('CCHOP_') && !key.startsWith('ANTHROPIC_')));
 let child: ChildProcess | undefined;
@@ -30,6 +33,13 @@ const upstream = createServer(async (req, res) => {
   assert.equal(req.headers['x-cchop-key'], undefined);
   assert.equal(req.headers.authorization, `Bearer ${remoteOauth.accessToken}`);
   assert.equal(req.headers['user-agent'], remoteUserAgent);
+  assert.equal(req.headers['x-claude-code-session-id'], upstreamRequests === 1 ? remoteSessionId : localIdentity.session_id);
+  if (upstreamRequests > 1) {
+    assert.equal(req.headers['x-claude-code-agent-id'], 'local-agent');
+    assert.equal(req.headers['x-claude-code-parent-agent-id'], 'local-parent');
+    assert.equal(req.headers['x-claude-code-prompt-id'], 'local-prompt');
+    assert.equal(req.headers['x-claude-code-request-class'], 'compaction');
+  }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
 });
@@ -101,6 +111,7 @@ try {
     headers: {
       authorization: `Bearer ${remoteOauth.accessToken}`, 'content-type': 'application/json',
       'user-agent': remoteUserAgent, 'anthropic-beta': 'oauth-test',
+      'x-claude-code-session-id': remoteSessionId, 'x-claude-code-prompt-id': 'capture-smoke-prompt', 'x-claude-code-request-class': 'main',
       'x-stainless-runtime': 'node', 'x-stainless-runtime-version': process.version,
     },
     body: captureBody,
@@ -110,10 +121,14 @@ try {
   await expectSuccessfulExit();
   assert.equal(receivedBodies[0], captureBody, 'Capture must forward the real remote request unchanged.');
   const fingerprintText = await readFile(join(directory, 'config', 'fingerprint.json'), 'utf8');
-  const fingerprint = JSON.parse(fingerprintText) as { headers: Record<string, string>; metadataUserId: string };
-  assert.equal(fingerprint.metadataUserId, remoteUserId);
+  const fingerprint = JSON.parse(fingerprintText) as { schemaVersion: number; headers: Record<string, string>; identity: typeof remoteIdentity };
+  assert.equal(fingerprint.schemaVersion, 2);
+  assert.deepEqual(fingerprint.identity, remoteIdentity);
   assert.equal(fingerprint.headers['user-agent'], remoteUserAgent);
-  for (const value of [remoteOauth.accessToken, remoteOauth.refreshToken, 'capture-smoke-private-prompt']) assert.equal(fingerprintText.includes(value), false);
+  assert.equal(fingerprint.headers['x-claude-code-session-id'], undefined);
+  assert.equal(fingerprint.headers['x-claude-code-prompt-id'], undefined);
+  assert.equal(fingerprint.headers['x-claude-code-request-class'], undefined);
+  for (const value of [remoteOauth.accessToken, remoteOauth.refreshToken, remoteSessionId, 'capture-smoke-prompt', 'capture-smoke-private-prompt']) assert.equal(fingerprintText.includes(value), false);
   const clientSettingsPath = join(directory, 'client.settings.json');
   const client = await execute(binary, ['--config', configPath, 'client', '--url', `http://127.0.0.1:${relayPort}`, '--output', clientSettingsPath], { cwd: directory, env });
   const settings = JSON.parse(await readFile(clientSettingsPath, 'utf8')) as { env: Record<string, string> };
@@ -132,13 +147,18 @@ try {
   assert.equal((await fetch(`http://127.0.0.1:${adminPort}${script}`)).status, 200);
   const response = await fetch(`http://127.0.0.1:${relayPort}/v1/messages`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${settings.env.ANTHROPIC_AUTH_TOKEN}`, 'content-type': 'application/json', 'user-agent': 'local-client-smoke' },
-    body: JSON.stringify({ messages: [], stream: true, metadata: { user_id: 'local-client-identity', extra: true } }),
+    headers: {
+      authorization: `Bearer ${settings.env.ANTHROPIC_AUTH_TOKEN}`, 'content-type': 'application/json', 'user-agent': 'local-client-smoke',
+      'x-claude-code-session-id': 'local-session', 'x-claude-code-agent-id': 'local-agent',
+      'x-claude-code-parent-agent-id': 'local-parent', 'x-claude-code-prompt-id': 'local-prompt',
+      'x-claude-code-request-class': 'compaction',
+    },
+    body: JSON.stringify({ messages: [], stream: true, metadata: { user_id: JSON.stringify(localIdentity), extra: true } }),
   });
   assert.equal(response.status, 200);
   assert.match(await response.text(), /message_stop/);
   assert.equal(upstreamRequests, 2);
-  assert.deepEqual(JSON.parse(receivedBodies[1]!), { messages: [], stream: true, metadata: { user_id: remoteUserId, extra: true } });
+  assert.deepEqual(JSON.parse(receivedBodies[1]!), { messages: [], stream: true, metadata: { user_id: JSON.stringify({ ...localIdentity, ...remoteIdentity }), extra: true } });
   const status = await fetch(`http://127.0.0.1:${adminPort}/api/status`, { headers: { 'x-cchop-admin-key': credentials.CCHOP_ADMIN_TOKEN! } });
   assert.equal(status.status, 200);
   const snapshot = await status.json() as { totals: { requests: number } };

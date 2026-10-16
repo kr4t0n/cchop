@@ -8,12 +8,13 @@ import { join } from 'node:path';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import { configSchema, type RuntimeConfig } from '../src/config.js';
-import { saveFingerprint } from '../src/fingerprint.js';
+import { saveFingerprint, type Fingerprint } from '../src/fingerprint.js';
 import { startApplication, type RunningApplication } from '../src/server.js';
 import type { RequestRecord, StatusSnapshot } from '../src/types.js';
 
 const secret = () => randomBytes(32).toString('base64url');
-const capturedIdentity = {
+const capturedIdentity: Fingerprint = {
+  schemaVersion: 2,
   capturedAt: new Date().toISOString(),
   nodeVersion: process.version,
   headers: {
@@ -26,7 +27,7 @@ const capturedIdentity = {
     'x-stainless-runtime-version': process.version,
     'x-stainless-package-version': '0.0.0-test',
   },
-  metadataUserId: 'captured-remote-user-and-session',
+  identity: { device_id: 'captured-device', account_uuid: 'captured-account' },
 };
 
 async function fixture(t: TestContext, handler: (req: IncomingMessage, res: ServerResponse) => void, overrides: Partial<RuntimeConfig> = {}) {
@@ -86,7 +87,8 @@ test('relay rejects unauthenticated, unsupported, duplicate, and oversized reque
 });
 
 test('replaces client identity and bearer authorization with the captured remote identity and subscription', async (t) => {
-  const body = JSON.stringify({ metadata: { user_id: 'original-session', future_metadata: { preserved: true } }, messages: [{ role: 'user', content: 'private prompt' }], future_field: [1, 2] });
+  const localIdentity = { device_id: 'local-device', account_uuid: 'local-account', session_id: 'original-session', future_identity: { nested: ['preserve', 7] } };
+  const body = JSON.stringify({ metadata: { user_id: JSON.stringify(localIdentity), future_metadata: { preserved: true } }, messages: [{ role: 'user', content: 'private prompt' }], future_field: [1, 2] });
   let receivedBody = '';
   let incoming: IncomingMessage | undefined;
   const f = await fixture(t, (req, res) => {
@@ -118,7 +120,7 @@ test('replaces client identity and bearer authorization with the captured remote
   assert.deepEqual(JSON.parse(result.body), { ok: true });
   assert.deepEqual(JSON.parse(receivedBody), {
     ...JSON.parse(body),
-    metadata: { user_id: capturedIdentity.metadataUserId, future_metadata: { preserved: true } },
+    metadata: { user_id: JSON.stringify({ ...localIdentity, ...capturedIdentity.identity }), future_metadata: { preserved: true } },
   });
   assert.equal(Number(incoming?.headers['content-length']), Buffer.byteLength(receivedBody));
   assert.equal(incoming?.url, '/v1/messages?beta=true&next=enabled');
@@ -128,8 +130,67 @@ test('replaces client identity and bearer authorization with the captured remote
   for (const name of ['x-cchop-key', 'x-cchop-admin-key', 'x-api-key', 'x-forwarded-for', 'x-remove-this', 'x-stainless-local-only']) assert.equal(incoming?.headers[name], undefined);
   await nextTurn();
   const logs = JSON.stringify([f.logs, f.events]);
-  for (const sensitive of [body, 'private prompt', 'original-session', capturedIdentity.metadataUserId, f.oauth.accessToken, f.oauth.refreshToken, f.config.gatewayToken, f.config.adminToken]) assert.equal(logs.includes(sensitive), false);
+  for (const sensitive of [body, 'private prompt', ...Object.values(capturedIdentity.identity), 'original-session', f.oauth.accessToken, f.oauth.refreshToken, f.config.gatewayToken, f.config.adminToken]) assert.equal(logs.includes(sensitive), false);
   assert.equal(f.logs[0]?.path, '/v1/messages');
+});
+
+test('preserves client sessions, correlation IDs, and current request hints across routes', async (t) => {
+  const received: { headers: IncomingMessage['headers']; body: string }[] = [];
+  const f = await fixture(t, (req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => { body += chunk; });
+    req.on('end', () => { received.push({ headers: req.headers, body }); res.end('{}'); });
+  });
+  const scenarios: { path: string; method: string; hints: Record<string, string> }[] = [
+    { path: '/v1/messages', method: 'POST', hints: {
+      'x-claude-code-request-class': 'subagent', 'x-claude-code-agent-type': 'Explore',
+      'x-claude-code-prev-tool-durations': 'Read=15', 'x-claude-code-future-hint': 'first',
+    } },
+    { path: '/v1/messages', method: 'POST', hints: {
+      'x-claude-code-request-class': 'compaction', 'x-claude-code-compaction': 'auto',
+      'x-claude-code-future-hint': 'second',
+    } },
+    { path: '/v1/messages/count_tokens', method: 'POST', hints: {
+      'x-claude-code-request-class': 'main', 'x-claude-code-context-compacted': 'auto',
+    } },
+    { path: '/v1/models', method: 'GET', hints: {} },
+    { path: '/v1/messages', method: 'POST', hints: {} },
+  ];
+  const hintNames = new Set(scenarios.flatMap(({ hints }) => Object.keys(hints)));
+  for (const [index, { path, method, hints }] of scenarios.entries()) {
+    const sessionId = `local-session-${index % 2}`;
+    const correlation: Record<string, string> = index < 3 ? {
+      'X-Claude-Code-Session-Id': sessionId,
+      'X-Claude-Code-Agent-Id': `local-agent-${index}`,
+      'X-Claude-Code-Parent-Agent-Id': `local-parent-${index}`,
+      'X-Claude-Code-Prompt-Id': `local-prompt-${index}`,
+    } : {};
+    const localIdentity = { device_id: 'local-device', account_uuid: 'local-account', ...(index < 3 ? { session_id: sessionId } : {}), future: [index] };
+    const response = await fetch(`${f.base}${path}`, {
+      method,
+      headers: { ...f.auth, ...hints, ...correlation },
+      ...(method === 'POST' ? { body: JSON.stringify({ metadata: { user_id: JSON.stringify(localIdentity), other: true }, messages: [] }) } : {}),
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    const incoming = received[index]!;
+    for (const name of ['X-Claude-Code-Session-Id', 'X-Claude-Code-Agent-Id', 'X-Claude-Code-Parent-Agent-Id', 'X-Claude-Code-Prompt-Id'] as const) {
+      assert.equal(incoming.headers[name.toLowerCase()], correlation[name]);
+    }
+    for (const name of hintNames) assert.equal(incoming.headers[name], hints[name]);
+    if (method === 'POST') {
+      const body = JSON.parse(incoming.body);
+      assert.deepEqual(JSON.parse(body.metadata.user_id), { ...localIdentity, ...capturedIdentity.identity });
+      assert.equal(JSON.parse(body.metadata.user_id).session_id, incoming.headers['x-claude-code-session-id']);
+      assert.equal(body.metadata.other, true);
+    }
+  }
+  await nextTurn();
+  const history = JSON.stringify([f.logs, f.events, f.app.metrics.snapshot(f.config, f.app.relayPort)]);
+  for (const identity of ['captured-account', 'captured-device', 'local-session-', 'local-agent-', 'local-parent-', 'local-prompt-']) {
+    assert.equal(history.includes(identity), false);
+  }
 });
 
 test('SSE first event arrives while upstream remains open; client cancellation closes upstream', { timeout: 5000 }, async (t) => {
@@ -185,7 +246,7 @@ test('only remote subscription credentials reach upstream and administration rem
   assert.equal(snapshot.relay.authMode, 'subscription');
   assert.equal(snapshot.totals.requests, 1);
   const serialized = JSON.stringify(snapshot);
-  for (const value of [f.oauth.accessToken, f.oauth.refreshToken, capturedIdentity.metadataUserId, f.config.adminToken, f.config.gatewayToken]) assert.equal(serialized.includes(value), false);
+  for (const value of [f.oauth.accessToken, f.oauth.refreshToken, ...Object.values(capturedIdentity.identity), f.config.adminToken, f.config.gatewayToken]) assert.equal(serialized.includes(value), false);
   const page = await fetch(f.admin);
   assert.match(page.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
   assert.match(await page.text(), /cchop/);
@@ -214,6 +275,7 @@ test('unknown future JSON fields and token counting remain compatible', async (t
   let body = '';
   const f = await fixture(t, (req, res) => {
     route = req.url;
+    body = '';
     req.setEncoding('utf8');
     req.on('data', (chunk: string) => { body += chunk; });
     req.on('end', () => res.end('{"input_tokens":4}'));
@@ -225,6 +287,13 @@ test('unknown future JSON fields and token counting remain compatible', async (t
   assert.deepEqual(await response.json(), { input_tokens: 4 });
   assert.equal(route, '/v1/messages/count_tokens?beta=true');
   assert.deepEqual(JSON.parse(body), { messages: [], future_capability: { enabled: true } });
+  const noUserId = { messages: [], metadata: { future_metadata: true } };
+  const noUserIdResponse = await fetch(`${f.base}/v1/messages`, {
+    method: 'POST', headers: { ...f.auth, 'x-claude-code-session-id': 'header-only-session' }, body: JSON.stringify(noUserId),
+  });
+  assert.equal(noUserIdResponse.status, 200);
+  await noUserIdResponse.text();
+  assert.deepEqual(JSON.parse(body), noUserId);
 });
 
 test('invalid JSON and compressed requests fail before OAuth refresh or inference', async (t) => {
@@ -242,6 +311,29 @@ test('invalid JSON and compressed requests fail before OAuth refresh or inferenc
   assert.equal(compressed.status, 415);
   await compressed.text();
   assert.equal(calls, 0, 'Rejected input must never trigger upstream authentication or inference.');
+});
+
+test('malformed nested identities and session conflicts fail before OAuth refresh or inference', async (t) => {
+  let calls = 0;
+  const f = await fixture(t, (_req, res) => { calls += 1; res.end('{}'); });
+  const credentials = JSON.stringify({ claudeAiOauth: { ...f.oauth, expiresAt: 0 } });
+  await writeFile(f.config.claudeCredentialsPath, credentials, { mode: 0o600 });
+  const identities = [null, [], {}, 12, '', 'legacy-private-id', '{broken-private-id', 'null', '[]', '12',
+    JSON.stringify({ session_id: 'different-private-session' }), JSON.stringify({ session_id: 12 }), JSON.stringify({ session_id: '' })];
+  for (const path of ['/v1/messages', '/v1/messages/count_tokens']) {
+    for (const userId of identities) {
+      const response = await fetch(`${f.base}${path}`, {
+        method: 'POST', headers: { ...f.auth, 'x-claude-code-session-id': 'local-private-session' },
+        body: JSON.stringify({ metadata: { user_id: userId }, messages: [] }),
+      });
+      assert.equal(response.status, 400);
+      assert.equal((await response.text()).includes('private'), false);
+    }
+  }
+  assert.equal(calls, 0);
+  assert.equal(await readFile(f.config.claudeCredentialsPath, 'utf8'), credentials);
+  await nextTurn();
+  assert.equal(JSON.stringify([f.logs, f.events]).includes('private'), false);
 });
 
 test('subscription credentials are reloaded from disk for subsequent requests', async (t) => {

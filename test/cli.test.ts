@@ -43,9 +43,10 @@ test('init, doctor, and client work from another directory and never print gener
   const oauth = { accessToken: randomBytes(32).toString('base64url'), refreshToken: randomBytes(32).toString('base64url'), expiresAt: Date.now() + 3600000 };
   await writeFile(claudeCredentialsPath, JSON.stringify({ claudeAiOauth: oauth }), { mode: 0o600 });
   await saveFingerprint(loaded.fingerprintPath, {
+    schemaVersion: 2,
     capturedAt: new Date().toISOString(), nodeVersion: process.version,
     headers: { 'user-agent': 'claude-cli/test', 'anthropic-beta': 'oauth-test', 'x-stainless-runtime': 'node', 'x-stainless-runtime-version': process.version },
-    metadataUserId: 'remote-cli-test-identity',
+    identity: { device_id: 'remote-cli-device', account_uuid: 'remote-cli-account' },
   });
   const diagnostic = await run('doctor', '--offline', '--json');
   const checks = JSON.parse(diagnostic.stdout).checks as { status: string }[];
@@ -67,6 +68,41 @@ test('init, doctor, and client work from another directory and never print gener
   await assert.rejects(run('init'), /already exists/);
   await assert.rejects(run('client', '--output', output), /already exists/);
   assert.equal(parseEnv(await readFile(join(directory, 'config', 'credentials.env'), 'utf8')).CCHOP_GATEWAY_TOKEN, secrets.CCHOP_GATEWAY_TOKEN);
+});
+
+test('old fingerprint formats block startup and doctor gives explicit recapture instructions', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'cchop-fingerprint-cli-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const configPath = join(directory, 'cchop.json');
+  const run = (...args: string[]) => exec(process.execPath, [cli, '--config', configPath, ...args], {
+    cwd: directory, env: isolatedEnv, timeout: 5000,
+  });
+  await run('init', '--credentials', join(directory, 'mock-claude-credentials.json'));
+  for (const schemaVersion of [undefined, 0, 1, 3]) {
+    const serialized = JSON.stringify({
+      schemaVersion, capturedAt: new Date().toISOString(), nodeVersion: process.version,
+      headers: { 'user-agent': 'claude-cli/test', 'x-claude-code-session-id': 'private-session' },
+      metadataUserId: JSON.stringify({ session_id: 'private-session' }),
+    });
+    const fingerprintPath = join(directory, 'fingerprint.json');
+    await writeFile(fingerprintPath, serialized, { mode: 0o600 });
+    await assert.rejects(run('start'), (error: unknown) => {
+      assert.ok(error instanceof Error && 'stderr' in error && typeof error.stderr === 'string');
+      assert.match(error.stderr, /Unsupported fingerprint format.*Stop the relay.*cchop capture --replace/);
+      assert.equal(error.stderr.includes('private-session'), false);
+      return true;
+    });
+    await assert.rejects(run('doctor', '--offline', '--json'), (error: unknown) => {
+      assert.ok(error instanceof Error && 'stdout' in error && typeof error.stdout === 'string');
+      const checks = JSON.parse(error.stdout).checks as { name: string; status: string; message: string }[];
+      const fingerprint = checks.find((check) => check.name === 'fingerprint');
+      assert.equal(fingerprint?.status, 'error');
+      assert.match(fingerprint!.message, /Unsupported fingerprint format.*Stop the relay.*cchop capture --replace/);
+      assert.equal(error.stdout.includes('private-session'), false);
+      return true;
+    });
+    assert.equal(await readFile(fingerprintPath, 'utf8'), serialized);
+  }
 });
 
 test('environment overrides supply secrets and invalid inputs fail closed', async (t) => {

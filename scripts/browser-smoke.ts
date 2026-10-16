@@ -45,9 +45,10 @@ try {
     adminToken: randomBytes(32).toString('base64url'),
   };
   await saveFingerprint(config.fingerprintPath, {
+    schemaVersion: 2,
     capturedAt: new Date().toISOString(), nodeVersion: process.version,
     headers: { 'user-agent': 'claude-cli/browser-smoke', 'anthropic-beta': 'oauth-test', 'x-stainless-runtime': 'node', 'x-stainless-runtime-version': process.version },
-    metadataUserId: 'browser-smoke-remote-identity',
+    identity: { device_id: 'browser-smoke-device', account_uuid: 'browser-smoke-account' },
   });
   await writeFile(config.claudeCredentialsPath, JSON.stringify({ claudeAiOauth: {
     accessToken: randomBytes(32).toString('base64url'), refreshToken: randomBytes(32).toString('base64url'), expiresAt: Date.now() + 3600000,
