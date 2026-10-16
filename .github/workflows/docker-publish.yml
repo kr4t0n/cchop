@@ -1,0 +1,207 @@
+name: Publish to Docker Hub
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'web/**'
+      - 'test/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'eslint.config.ts'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.env.example'
+      - 'README.md'
+      - 'AGENTS.md'
+      - '.github/workflows/docker-publish.yml'
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Publish to Docker Hub (disable to build and test only)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      PUBLISH_IMAGE: ${{ github.repository == 'kr4t0n/cchop' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+      - run: npm ci
+      - name: Validate version tag
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { VERSION } from './src/config.ts';
+
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+          const web = JSON.parse(readFileSync('web/package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          assert.match(manifest.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+          assert.equal(process.env.RELEASE_TAG, `v${manifest.version}`, 'Use a stable version tag matching the package');
+          assert.equal(VERSION, manifest.version);
+          assert.equal(web.version, manifest.version);
+          assert.equal(lock.version, manifest.version);
+          assert.equal(lock.packages[''].version, manifest.version);
+          assert.equal(lock.packages.web.version, manifest.version);
+          NODE
+      - run: npm run check
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Compute image labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME || github.repository_owner }}/cchop
+          labels: |
+            org.opencontainers.image.title=cchop
+            org.opencontainers.image.description=Claude Code subscription relay and operations dashboard
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Build and load for testing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: cchop:ci
+          load: true
+          push: false
+          provenance: false
+          cache-from: type=gha,scope=cchop-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cchop-${{ matrix.arch }}
+      - name: Test the native container
+        run: npm run test:docker -- cchop:ci
+      - name: Log in to Docker Hub
+        if: env.PUBLISH_IMAGE == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Publish the cached image by digest
+        if: env.PUBLISH_IMAGE == 'true'
+        id: publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/cchop,push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+          cache-from: type=gha,scope=cchop-${{ matrix.arch }}
+      - name: Export digest
+        if: env.PUBLISH_IMAGE == 'true'
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${IMAGE_DIGEST#sha256:}"
+      - name: Upload digest
+        if: env.PUBLISH_IMAGE == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish multi-platform tags
+    needs: build
+    if: github.repository == 'kr4t0n/cchop' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.18.0'
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Compute tags
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/cchop
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short,prefix=sha-
+            type=raw,value=manual-${{ github.run_id }},enable=${{ github.event_name == 'workflow_dispatch' }}
+      - name: Create and verify multi-platform tags
+        env:
+          IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/cchop
+          DIGEST_DIRECTORY: ${{ runner.temp }}/digests
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { readdirSync } from 'node:fs';
+
+          const image = process.env.IMAGE_NAME;
+          const files = readdirSync(process.env.DIGEST_DIRECTORY);
+          assert.equal(files.length, 2, 'Both native builds must provide a digest');
+          for (const file of files) assert.match(file, /^[0-9a-f]{64}$/);
+          const digests = files.map((file) => `sha256:${file}`).sort();
+          const { tags } = JSON.parse(process.env.DOCKER_METADATA_OUTPUT_JSON);
+          assert.ok(Array.isArray(tags) && tags.length > 0, 'At least one image tag is required');
+          for (const tag of tags) assert.ok(tag.startsWith(`${image}:`));
+          execFileSync('docker', [
+            'buildx', 'imagetools', 'create',
+            ...tags.flatMap((tag) => ['--tag', tag]),
+            ...digests.map((digest) => `${image}@${digest}`),
+          ], { stdio: 'inherit' });
+          for (const tag of tags) {
+            const manifest = JSON.parse(execFileSync('docker', ['buildx', 'imagetools', 'inspect', tag, '--raw'], { encoding: 'utf8' }));
+            assert.deepEqual(manifest.manifests.map((entry) => entry.digest).sort(), digests, 'Published digests must match the tested builds');
+            assert.deepEqual(manifest.manifests.map((entry) => `${entry.platform.os}/${entry.platform.architecture}`).sort(), ['linux/amd64', 'linux/arm64']);
+            console.log(`Verified ${tag}: linux/amd64 and linux/arm64.`);
+          }
+          NODE

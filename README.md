@@ -34,7 +34,7 @@ docker run --rm cchop:local cchop --version
 docker run --rm cchop:local claude --version
 ```
 
-The [Dockerfile](Dockerfile) pins the current [official Node slim image](https://hub.docker.com/_/node) at Node **26.12.0**, Debian trixie, with its multi-platform digest, and installs Claude Code **2.1.301** from [Anthropic's npm package](https://code.claude.com/docs/en/setup#install-with-npm). cchop is compiled from the checkout with locked production dependencies. Build tools and source code stay out of the final image. Claude Code limits supported Linux architectures to amd64 and arm64; the smoke check runs on amd64.
+The [Dockerfile](Dockerfile) pins the current [official Node slim image](https://hub.docker.com/_/node) at Node **26.12.0**, Debian trixie, with its multi-platform digest, and installs Claude Code **2.1.301** from [Anthropic's npm package](https://code.claude.com/docs/en/setup#install-with-npm). cchop is compiled from the checkout with locked production dependencies. Build tools and source code stay out of the final image. The [Docker Hub workflow](#docker-hub-publishing) builds and smoke-tests amd64 and arm64 on native runners, then publishes one image supporting both architectures.
 
 The image runs as `node` (UID/GID 1000) and defaults to `cchop start`, with Tini forwarding shutdown signals. Mount a named volume at **`/home/node`** for Claude's `.claude/` and `.claude.json`, plus cchop's `.config/cchop/`. Keep that entire volume private. For a bind mount instead, prepare an empty directory writable by UID/GID 1000; do not mount your normal home directory. Do not share the volume between running relay instances or run Claude while the relay owns the credentials.
 
@@ -86,7 +86,7 @@ chmod 600 ./claude.settings.json
 
 Substitute your actual relay URL; use `http://127.0.0.1:8787` for a client on the Docker host. Transfer this file privately as described below. The command refuses to overwrite an existing settings file.
 
-`NODE_IMAGE` and `CLAUDE_CODE_VERSION` are build arguments for explicit upgrades. Update the pinned defaults (including the Node digest), rebuild, stop the relay, and repeat the setup shell's capture step with `cchop capture --replace` using the existing volume; do not rerun `init`. Claude's automatic and manual updater commands are disabled with `DISABLE_AUTOUPDATER=1` and `DISABLE_UPDATES=1`, so installed binaries remain part of the image. Never bake login state or cchop secrets into an image. Container images are built locally; the npm release workflow does not publish them.
+`NODE_IMAGE` and `CLAUDE_CODE_VERSION` are build arguments for explicit upgrades. Update the pinned defaults (including the Node digest), rebuild, stop the relay, and repeat the setup shell's capture step with `cchop capture --replace` using the existing volume; do not rerun `init`. Claude's automatic and manual updater commands are disabled with `DISABLE_AUTOUPDATER=1` and `DISABLE_UPDATES=1`, so installed binaries remain part of the image. Never bake login state or cchop secrets into an image. Docker Hub publication uses its own workflow, separate from npm releases.
 
 ## First-time setup on the relay host
 
@@ -252,7 +252,7 @@ npm run test:docker
 
 `npm run test:docker` checks the built image (or pass another tag with `npm run test:docker -- <image>`): both CLIs, non-root volume ownership, capture, OAuth refresh persistence, request rewriting, bundled dashboard, default startup, and SIGTERM shutdown. It creates and removes a temporary Docker volume and runs containers with networking disabled; mock provider traffic stays on container loopback.
 
-All automated checks use temporary fake fingerprints, generated test credentials, and loopback API/OAuth servers. They do not read the operator's credential store or make real subscription requests. Successful mock checks establish implementation behavior; live remote login, capture, and provider compatibility still require operator validation. Tests supervise and close their temporary services in the foreground. CI runs lint, types, tests, builds, package/browser checks, and a Docker build and smoke check.
+All automated checks use temporary fake fingerprints, generated test credentials, and loopback API/OAuth servers. They do not read the operator's credential store or make real subscription requests. Successful mock checks establish implementation behavior; live remote login, capture, and provider compatibility still require operator validation. Tests supervise and close their temporary services in the foreground. The CI workflow runs lint, types, tests, builds, and package/browser checks. The Docker Hub workflow also runs application checks and container smoke tests on native amd64 and arm64 runners; relevant pull requests build and test without publishing.
 
 For dashboard development, first build and start cchop, then run `npm run dev --workspace @cchop/web` in another terminal. Vite forwards `/api` to the default local admin port.
 
@@ -260,7 +260,40 @@ For dashboard development, first build and start cchop, then run `npm run dev --
 
 Keep the version in the root and web package manifests, lockfile, `src/config.ts`, and the installed-version assertion in `scripts/package-smoke.ts` aligned. Update versioned installation examples when releasing a new version.
 
-### GitHub Actions publishing
+### Docker Hub publishing
+
+The [Publish to Docker Hub workflow](.github/workflows/docker-publish.yml) publishes `<DOCKERHUB_USERNAME>/cchop`. Configure these repository secrets under **Settings → Secrets and variables → Actions**:
+
+| Secret | Value |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Docker Hub account owning the `cchop` repository, normally `kr4t0n` |
+| `DOCKERHUB_TOKEN` | Docker Hub access token with Read & Write permission for that repository |
+
+Create the Docker Hub repository first and make it public if anonymous pulls are intended. Supply the token through GitHub's secret settings; never put it in source, build arguments, or workflow YAML.
+
+| Trigger | Docker Hub result |
+| --- | --- |
+| Push to `main` | `latest`, `main`, `sha-<short commit>` |
+| Push a stable version tag, such as `v0.2.0` | `latest`, `v0.2.0`, `0.2.0`, `0.2`, `sha-<short commit>` |
+| Manual run with **push** enabled (the default) | Tags for the selected branch/tag, plus `manual-<run_id>` and the commit tag |
+| Manual run with **push** disabled | Build and test both architectures; no registry login or publication |
+| Pull request targeting `main` that changes image inputs or checks | Build and test both architectures; no registry login or publication |
+
+Version tags must match the stable version in the package manifests, lockfile, and CLI. Prerelease and mismatched version tags fail validation. `latest` follows completed main-branch and stable-tag publications; use a version or commit tag when you need a particular build. Publishing a GitHub release is not required for Docker images; npm publication still requires the separate release event described below.
+
+Each architecture builds on a native GitHub-hosted runner (`ubuntu-latest` for amd64 and `ubuntu-24.04-arm` for arm64), with a separate BuildKit cache. The workflow runs `npm run check`, loads the image, and runs `npm run test:docker` before pushing that architecture by digest. Once both jobs pass, it assembles the tags from those digests and verifies that every tag contains the expected amd64 and arm64 manifests. A failed architecture prevents tag publication; an already-uploaded untagged digest may remain. Runs on the same Git ref cancel older in-progress runs. Forks never publish.
+
+After the first successful publication, use the published image in place of `cchop:local` in the setup commands above, for example:
+
+```bash
+docker pull kr4t0n/cchop:main
+docker run --rm kr4t0n/cchop:main cchop --version
+docker run --rm kr4t0n/cchop:main claude --version
+```
+
+Replace `kr4t0n` if a different Docker Hub account is configured. Pulling an image does not initialize state or log in to Claude; reuse the documented setup/capture flow and private home volume. A local image build or a manual build-only run does not establish Docker Hub availability; inspect the publish workflow's manifest verification before announcing a release.
+
+### npm publishing with GitHub Actions
 
 The [Publish to npm workflow](.github/workflows/publish.yml) runs when a stable GitHub release is published. It checks out that release's tag, checks that `v<version>` matches the package and CLI versions, runs lint, types, builds, protocol/CLI tests, and package/browser smoke checks, then publishes the tested tarball with provenance. It verifies that npm serves the same artifact. Prereleases are skipped. Concurrent publishing runs are serialized.
 
@@ -300,6 +333,7 @@ Run `npm run check`, `npm run test:package`, and `npm run test:browser`. The pac
 | `test/`, `scripts/` | Protocol/CLI tests and package/browser/Docker smoke checks |
 | `Dockerfile`, `.dockerignore` | Slim Node image with Claude Code and source-built cchop; restricted build context |
 | `.github/workflows/ci.yml` | Application verification |
+| `.github/workflows/docker-publish.yml` | Native amd64/arm64 checks and Docker Hub publication |
 | `.github/workflows/publish.yml` | Stable-release npm publishing and manual validation |
 
 The relay serves messages, token counting, models, and the connection-warming probe. Logs contain request metadata and sanitized capture/refresh diagnostics, never prompts, OAuth tokens, gateway keys, or `metadata.user_id`. Request history is bounded and in memory; restarting clears it. Dashboard credentials stay only in browser memory. No account pooling, credential sharing service, or infrastructure deployment manifests are included.
