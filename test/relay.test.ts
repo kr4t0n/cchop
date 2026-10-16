@@ -347,40 +347,59 @@ test('subscription credentials are reloaded from disk for subsequent requests', 
   assert.deepEqual(authorizations, [`Bearer ${f.oauth.accessToken}`, `Bearer ${replacement.accessToken}`]);
 });
 
-test('expiring subscriptions refresh and persist before the rewritten request reaches inference', async (t) => {
-  const refreshed = { accessToken: secret(), refreshToken: secret() };
-  let refreshes = 0;
-  let refreshBody = '';
-  let authorization: string | undefined;
-  const f = await fixture(t, (req, res) => {
-    if (req.url === '/oauth/token') {
-      refreshes += 1;
-      req.setEncoding('utf8');
-      req.on('data', (chunk: string) => { refreshBody += chunk; });
-      req.on('end', () => {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ access_token: refreshed.accessToken, refresh_token: refreshed.refreshToken, expires_in: 3600 }));
+test('expiring subscriptions commit OAuth metadata before inference with or without token rotation', async (t) => {
+  for (const rotate of [true, false]) {
+    await t.test(rotate ? 'rotated refresh token' : 'retained refresh token', async (t) => {
+      const refreshed = { accessToken: secret(), refreshToken: secret() };
+      let refreshes = 0;
+      let refreshBody = '';
+      let authorization: string | undefined;
+      let storedAtInference: string | undefined;
+      const before = Date.now();
+      const f = await fixture(t, async (req, res) => {
+        if (req.url === '/oauth/token') {
+          refreshes += 1;
+          req.setEncoding('utf8');
+          req.on('data', (chunk: string) => { refreshBody += chunk; });
+          req.on('end', () => {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ access_token: refreshed.accessToken, expires_in: 3600,
+              ...(rotate ? { refresh_token: refreshed.refreshToken } : {}),
+              scope: 'user:inference user:profile', refresh_token_expires_in: 86400,
+            }));
+          });
+        } else {
+          authorization = req.headers.authorization;
+          storedAtInference = await readFile(f.config.claudeCredentialsPath, 'utf8');
+          res.end('{}');
+        }
       });
-    } else {
-      authorization = req.headers.authorization;
-      res.end('{}');
-    }
-  });
-  await writeFile(f.config.claudeCredentialsPath, JSON.stringify({ claudeAiOauth: { ...f.oauth, expiresAt: Date.now() + 60000 }, unrelated: { preserved: true } }), { mode: 0o600 });
-  const response = await fetch(`${f.base}/v1/messages`, { method: 'POST', headers: f.auth, body: '{}' });
-  assert.equal(response.status, 200);
-  await response.text();
-  assert.equal(refreshes, 1);
-  assert.deepEqual(JSON.parse(refreshBody), { grant_type: 'refresh_token', refresh_token: f.oauth.refreshToken, client_id: f.config.oauthClientId });
-  assert.equal(authorization, `Bearer ${refreshed.accessToken}`);
-  const stored = JSON.parse(await readFile(f.config.claudeCredentialsPath, 'utf8')) as { claudeAiOauth: typeof f.oauth; unrelated: unknown };
-  assert.equal(stored.claudeAiOauth.accessToken, refreshed.accessToken);
-  assert.equal(stored.claudeAiOauth.refreshToken, refreshed.refreshToken);
-  assert.ok(stored.claudeAiOauth.expiresAt > Date.now() + 3000000);
-  assert.deepEqual(stored.unrelated, { preserved: true });
-  await nextTurn();
-  const logs = JSON.stringify([f.logs, f.events]);
-  for (const value of [f.oauth.accessToken, f.oauth.refreshToken, refreshed.accessToken, refreshed.refreshToken]) assert.equal(logs.includes(value), false);
+      await writeFile(f.config.claudeCredentialsPath, JSON.stringify({
+        claudeAiOauth: { ...f.oauth, expiresAt: Date.now() + 60000, refreshTokenExpiresAt: Date.now() + 120000, clientId: 'stored-client' },
+        unrelated: { preserved: true },
+      }), { mode: 0o600 });
+      const response = await fetch(`${f.base}/v1/messages`, { method: 'POST', headers: f.auth, body: '{}' });
+      assert.equal(response.status, 200);
+      await response.text();
+      assert.equal(refreshes, 1);
+      assert.deepEqual(JSON.parse(refreshBody), {
+        grant_type: 'refresh_token', refresh_token: f.oauth.refreshToken, client_id: 'stored-client', scope: 'user:inference',
+      });
+      assert.equal(authorization, `Bearer ${refreshed.accessToken}`);
+      const stored = JSON.parse(storedAtInference!);
+      assert.equal(stored.claudeAiOauth.accessToken, refreshed.accessToken);
+      assert.equal(stored.claudeAiOauth.refreshToken, rotate ? refreshed.refreshToken : f.oauth.refreshToken);
+      assert.ok(stored.claudeAiOauth.expiresAt > Date.now() + 3000000);
+      assert.ok(stored.claudeAiOauth.refreshTokenExpiresAt >= before + 86400000);
+      assert.ok(stored.claudeAiOauth.refreshTokenExpiresAt <= Date.now() + 86400000);
+      assert.deepEqual(stored.claudeAiOauth.scopes, ['user:inference', 'user:profile']);
+      assert.equal(stored.claudeAiOauth.clientId, 'stored-client');
+      assert.deepEqual(stored.unrelated, { preserved: true });
+      await nextTurn();
+      const logs = JSON.stringify([f.logs, f.events]);
+      for (const value of [f.oauth.accessToken, f.oauth.refreshToken, refreshed.accessToken, refreshed.refreshToken]) assert.equal(logs.includes(value), false);
+    });
+  }
 });
 
 test('failed OAuth refresh preserves credentials and blocks inference without leaking provider error details', async (t) => {

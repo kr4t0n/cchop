@@ -40,7 +40,7 @@ Log in to your subscription using the remote Claude Code installation, with rela
 env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_CUSTOM_HEADERS claude auth login
 ```
 
-The [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) documents this login command. cchop expects `~/.claude/.credentials.json`, containing `claudeAiOauth.accessToken`, `refreshToken`, and millisecond `expiresAt`. For a different location, use `cchop init --credentials /absolute/path/to/.credentials.json`, or configure the path afterwards. In particular, point cchop explicitly at the matching file if Claude Code uses `CLAUDE_CONFIG_DIR`; see [Claude credential storage](https://code.claude.com/docs/en/authentication#credential-management).
+The [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) documents this login command. cchop expects `~/.claude/.credentials.json`, containing `claudeAiOauth.accessToken`, `refreshToken`, and millisecond `expiresAt`. It also reads optional `clientId`, `scopes`, and millisecond `refreshTokenExpiresAt` fields. For a different location, use `cchop init --credentials /absolute/path/to/.credentials.json`, or configure the path afterwards. In particular, point cchop explicitly at the matching file if Claude Code uses `CLAUDE_CONFIG_DIR`; see [Claude credential storage](https://code.claude.com/docs/en/authentication#credential-management).
 
 Keep any recovery backup private and outside the project. A backup containing an already-rotated refresh token may no longer authenticate; a fresh remote login is the recovery path when credentials cannot be refreshed.
 
@@ -109,8 +109,10 @@ flowchart LR
 1. Compare the incoming bearer key using SHA-256 and constant-time comparison. Reject invalid or duplicate authentication headers before reading credentials or contacting the provider.
 2. Strip local `user-agent`, `x-app`, `anthropic-version`, `anthropic-beta`, `sec-fetch-mode`, all `x-stainless-*`, provider credentials, gateway headers, and hop-by-hop/forwarding headers. Apply the captured reusable headers. Pass through the client's `x-claude-code-session-id`, `x-claude-code-agent-id`, `x-claude-code-parent-agent-id`, and `x-claude-code-prompt-id` when present; absent headers stay absent. Other `x-claude-code-*` request hints, including request class, agent type, compaction state, and tool durations, also pass through from the current request. None are replayed from the capture.
 3. When `metadata.user_id` exists, parse its JSON-encoded object, replace only `device_id` and `account_uuid` with captured values, and serialize it back to a string. Preserve the client's `session_id`, every other user-ID field, and the rest of the request. Missing metadata or a missing user ID stays absent. Session header/body values must match when both exist; malformed identities and conflicting sessions return **400** before credential refresh or inference. Invalid JSON, invalid metadata, and compressed request bodies are rejected; content length is recalculated from the rewritten bytes.
-4. Read the remote credential file for every request. Within five minutes of expiry, refresh through the configured token endpoint. One in-process promise serializes refreshes. Persist both newly returned tokens and expiry through an owner-only temporary file and atomic rename, preserving other credential metadata. A failed refresh or persistence returns **503**, without forwarding an inference request or returning an unpersisted access token.
+4. Read the remote credential file for every request. Within five minutes of access-token expiry, refresh through the configured token endpoint. Use the stored `claudeAiOauth.clientId` when present, otherwise `oauthClientId`; send stored nonempty `scopes` as a space-delimited `scope` without adding new grants. One in-process promise serializes refreshes. Persist the new access token and expiry together with the returned refresh token, or retain the existing refresh token when the response omits it. Update `scopes` from a supplied `scope` and `refreshTokenExpiresAt` from a supplied `refresh_token_expires_in` (seconds converted to an absolute millisecond timestamp); omitted fields retain their stored values. Commit all fields through one owner-only temporary file and atomic rename, preserving unrelated metadata. A failed refresh or persistence returns **503**, without forwarding an inference request or returning an unpersisted access token.
 5. Send the rewritten request with the remote OAuth bearer token using Node.js and undici. Stream the response with backpressure. Client disconnection cancels upstream work. Inference requests are never automatically retried; redirects are rejected.
+
+OAuth responses may omit a replacement refresh token, scope, or refresh-token expiry. Explicit malformed values, including a null or empty replacement refresh token, are rejected without modifying the credential file. An explicitly empty `scope` clears the stored scope list; a zero refresh-token lifetime records expiry at response processing time. Legacy credential files without optional metadata remain supported: the configured client ID is used and `scope` is omitted when no stored scopes are available. Stored optional fields must have valid types.
 
 Device/account identity comes from capture; session and execution correlation remain with the current client. No session mapping state is needed, so distinct sessions stay distinct and resumed sessions keep their IDs across relay restarts. Captured capability headers remain fixed: changes in the local client's capability headers are not merged into the recorded fingerprint. Re-capture after remote client upgrades. cchop does not claim that rewriting identity prevents account enforcement or proves equivalence with the remote client's TLS handshake.
 
@@ -142,7 +144,7 @@ Device/account identity comes from capture; session and execution correlation re
 | `CCHOP_ADMIN_HOST`, `CCHOP_ADMIN_PORT` | Administration listener overrides |
 | `CCHOP_UPSTREAM` | Upstream API origin |
 | `CCHOP_PUBLIC_URL` | Relay origin for generated settings |
-| `CCHOP_OAUTH_TOKEN_URL`, `CCHOP_OAUTH_CLIENT_ID` | Public OAuth application settings; defaults follow the source document |
+| `CCHOP_OAUTH_TOKEN_URL`, `CCHOP_OAUTH_CLIENT_ID` | Token endpoint and fallback OAuth client ID; a stored credential `clientId` takes precedence |
 
 See [.env.example](.env.example). OAuth access and refresh tokens are read from the configured Claude credential file, not cchop environment variables.
 
@@ -156,7 +158,7 @@ See [.env.example](.env.example). OAuth access and refresh tokens are read from 
 | `fingerprintPath` | `fingerprint.json` | Relative to configuration directory |
 | `claudeCredentialsPath` | `~/.claude/.credentials.json` as an absolute path | Remote credential file |
 | `oauthTokenUrl` | `https://platform.claude.com/v1/oauth/token` | Token refresh endpoint from the document |
-| `oauthClientId` | `9d1c250a-e61b-44d9-88ed-5944d1962f5e` | Public OAuth client ID from the document |
+| `oauthClientId` | `9d1c250a-e61b-44d9-88ed-5944d1962f5e` | Fallback public OAuth client ID; stored credential `clientId` takes precedence |
 | `maxRequestBytes` | `33554432` | Body bound before and after rewriting |
 | `maxConcurrent` | `32` | Concurrent authenticated relay requests |
 | `headersTimeoutMs` | `60000` | Upstream header timeout |

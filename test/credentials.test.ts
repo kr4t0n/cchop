@@ -20,6 +20,7 @@ function credentials(expiresAt = Date.now() - 1000): ClaudeCredentials {
       accessToken: fakeToken(),
       refreshToken: fakeToken(),
       expiresAt,
+      refreshTokenExpiresAt: Date.now() + 86400000,
       scopes: ['user:inference', 'user:profile'],
       subscriptionType: 'test-subscription',
       extraNested: { untouched: true },
@@ -79,6 +80,7 @@ test('concurrent callers refresh once, persist rotated tokens and retain unknown
       grant_type: 'refresh_token',
       refresh_token: initial.claudeAiOauth.refreshToken,
       client_id: 'test-client',
+      scope: initial.claudeAiOauth.scopes!.join(' '),
     });
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, expires_in: 3600 }));
@@ -118,14 +120,94 @@ test('successive refreshes use the last persisted rotation and notice externally
   await writeFile(path, JSON.stringify(first));
   assert.equal(await current.getAccessToken(), rotations[1]!.access_token);
   assert.deepEqual(seen, [
-    { grant_type: 'refresh_token', refresh_token: initial.claudeAiOauth.refreshToken, client_id: 'test-client' },
-    { grant_type: 'refresh_token', refresh_token: rotations[0]!.refresh_token, client_id: 'test-client' },
+    { grant_type: 'refresh_token', refresh_token: initial.claudeAiOauth.refreshToken, client_id: 'test-client', scope: initial.claudeAiOauth.scopes!.join(' ') },
+    { grant_type: 'refresh_token', refresh_token: rotations[0]!.refresh_token, client_id: 'test-client', scope: initial.claudeAiOauth.scopes!.join(' ') },
   ]);
   const external = credentials(Date.now() + 7200000);
   await writeFile(`${path}.replacement`, JSON.stringify(external));
   await rename(`${path}.replacement`, path);
   assert.equal(await current.getAccessToken(), external.claudeAiOauth.accessToken);
   assert.equal(seen.length, 2);
+});
+
+test('refresh without rotation retains the token, updates metadata, and uses stored client and granted scopes', async (t) => {
+  const initial = credentials();
+  initial.claudeAiOauth.clientId = 'stored-oauth-client';
+  const { path, directory } = await fixture(t, initial);
+  const responses = [
+    { access_token: fakeToken(), expires_in: 3600, scope: 'user:inference user:mcp', refresh_token_expires_in: 172800 },
+    { access_token: fakeToken(), refresh_token: fakeToken(), expires_in: 3600 },
+  ];
+  const seen: unknown[] = [];
+  const events: unknown[] = [];
+  const tokenUrl = await mockOAuth(t, async (request, response) => {
+    seen.push(await requestBody(request));
+    response.end(JSON.stringify(responses[seen.length - 1]));
+  });
+  const current = provider(t, { path, tokenUrl, clientId: 'configured-fallback', onEvent: (event) => events.push(event) });
+  const before = Date.now();
+  assert.deepEqual(await Promise.all(Array.from({ length: 20 }, () => current.getAccessToken())), Array(20).fill(responses[0]!.access_token));
+  assert.equal(seen.length, 1);
+  const first = await readCredentials(path);
+  assert.ok(first.claudeAiOauth.refreshTokenExpiresAt! >= before + 172800000);
+  assert.ok(first.claudeAiOauth.refreshTokenExpiresAt! <= Date.now() + 172800000);
+  assert.deepEqual(first, {
+    ...initial,
+    claudeAiOauth: { ...initial.claudeAiOauth, accessToken: responses[0]!.access_token, expiresAt: first.claudeAiOauth.expiresAt,
+      scopes: ['user:inference', 'user:mcp'], refreshTokenExpiresAt: first.claudeAiOauth.refreshTokenExpiresAt },
+  });
+  first.claudeAiOauth.expiresAt = 0;
+  await writeFile(path, JSON.stringify(first));
+  assert.equal(await current.getAccessToken(), responses[1]!.access_token);
+  const second = await readCredentials(path);
+  assert.deepEqual(second, {
+    ...first,
+    claudeAiOauth: { ...first.claudeAiOauth, accessToken: responses[1]!.access_token, refreshToken: responses[1]!.refresh_token,
+      expiresAt: second.claudeAiOauth.expiresAt },
+  });
+  assert.deepEqual(seen, [
+    { grant_type: 'refresh_token', refresh_token: initial.claudeAiOauth.refreshToken, client_id: 'stored-oauth-client', scope: 'user:inference user:profile' },
+    { grant_type: 'refresh_token', refresh_token: initial.claudeAiOauth.refreshToken, client_id: 'stored-oauth-client', scope: 'user:inference user:mcp' },
+  ]);
+  assert.deepEqual(events, Array(2).fill({ event: 'oauth_refresh', status: 'ok' }));
+  assert.deepEqual(await readdir(directory), ['credentials.json']);
+});
+
+test('legacy credentials and empty stored scopes use the configured client without inventing scopes or refresh expiry', async (t) => {
+  for (const scopes of [undefined, []]) {
+    await t.test(scopes ? 'empty scopes' : 'absent scopes', async (t) => {
+      const initial = credentials();
+      delete initial.claudeAiOauth.refreshTokenExpiresAt;
+      if (scopes) initial.claudeAiOauth.scopes = scopes;
+      else delete initial.claudeAiOauth.scopes;
+      const { path } = await fixture(t, initial);
+      const next = fakeToken();
+      const tokenUrl = await mockOAuth(t, async (request, response) => {
+        assert.deepEqual(await requestBody(request), {
+          grant_type: 'refresh_token', refresh_token: initial.claudeAiOauth.refreshToken, client_id: 'configured-client',
+        });
+        response.end(JSON.stringify({ access_token: next, expires_in: 3600 }));
+      });
+      const current = provider(t, { path, tokenUrl, clientId: 'configured-client' });
+      assert.equal(await current.getAccessToken(), next);
+      const saved = await readCredentials(path);
+      assert.deepEqual(saved, { ...initial, claudeAiOauth: { ...initial.claudeAiOauth, accessToken: next, expiresAt: saved.claudeAiOauth.expiresAt } });
+    });
+  }
+});
+
+test('explicit empty scopes and zero refresh lifetime replace previous metadata', async (t) => {
+  const { path } = await fixture(t);
+  const before = Date.now();
+  const tokenUrl = await mockOAuth(t, (_request, response) => {
+    response.end(JSON.stringify({ access_token: fakeToken(), expires_in: 3600, scope: '', refresh_token_expires_in: 0 }));
+  });
+  const current = provider(t, { path, tokenUrl, clientId: 'test-client' });
+  await current.getAccessToken();
+  const saved = await readCredentials(path);
+  assert.deepEqual(saved.claudeAiOauth.scopes, []);
+  assert.ok(saved.claudeAiOauth.refreshTokenExpiresAt! >= before);
+  assert.ok(saved.claudeAiOauth.refreshTokenExpiresAt! <= Date.now());
 });
 
 test('valid credentials outside the refresh window require no OAuth request; near expiry refreshes', async (t) => {
@@ -167,18 +249,46 @@ test('invalid credential files fail without leaking file contents', async (t) =>
   }
 });
 
+test('malformed stored OAuth metadata fails before contacting the token endpoint', async (t) => {
+  const { path, initial } = await fixture(t);
+  const invalid = [
+    { clientId: '' }, { clientId: null }, { clientId: 'private\nclient' },
+    { scopes: 'user:inference' }, { scopes: null }, { scopes: [''] }, { scopes: ['user:inference private:scope'] }, { scopes: [42] },
+    { refreshTokenExpiresAt: -1 }, { refreshTokenExpiresAt: null }, { refreshTokenExpiresAt: 'tomorrow' }, { refreshTokenExpiresAt: 1e300 },
+  ];
+  let calls = 0;
+  const tokenUrl = await mockOAuth(t, (_request, response) => { calls += 1; response.end('{}'); });
+  const current = provider(t, { path, tokenUrl, clientId: 'test-client' });
+  for (const fields of invalid) {
+    const original = JSON.stringify({ ...initial, claudeAiOauth: { ...initial.claudeAiOauth, ...fields } });
+    await writeFile(path, original);
+    await assert.rejects(current.getAccessToken(), (error: unknown) => {
+      assert.ok(error instanceof CredentialError);
+      assert.match(error.message, /invalid or missing OAuth fields/);
+      assert.equal(error.message.includes('private'), false);
+      return true;
+    });
+    assert.equal(await readFile(path, 'utf8'), original);
+  }
+  assert.equal(calls, 0);
+});
+
 test('malformed OAuth responses leave previous credentials untouched and report sanitized errors', async (t) => {
   const { path, directory, initial } = await fixture(t);
   const original = await readFile(path, 'utf8');
   const secret = fakeToken();
   const invalid = [
     secret,
-    JSON.stringify({ access_token: secret, expires_in: 3600 }),
     JSON.stringify({ refresh_token: secret, expires_in: 3600 }),
     JSON.stringify({ access_token: secret, refresh_token: secret, expires_in: 0 }),
     JSON.stringify({ access_token: secret, refresh_token: secret, expires_in: '3600' }),
     JSON.stringify({ access_token: `${secret}\r\n`, refresh_token: secret, expires_in: 3600 }),
     JSON.stringify({ access_token: secret, refresh_token: secret, expires_in: 1e300 }),
+    ...[
+      { refresh_token: null }, { refresh_token: '' }, { refresh_token: 42 }, { refresh_token: `${secret}\n` },
+      { scope: null }, { scope: ['user:inference'] }, { scope: 'user:inference\nprivate:scope' }, { scope: 'user:"inference' }, { scope: 'user:\\inference' },
+      { refresh_token_expires_in: null }, { refresh_token_expires_in: '3600' }, { refresh_token_expires_in: -1 }, { refresh_token_expires_in: 1e300 },
+    ].map((fields) => JSON.stringify({ access_token: secret, refresh_token: secret, expires_in: 3600, ...fields })),
   ];
   const events: unknown[] = [];
   let calls = 0;
@@ -291,8 +401,9 @@ test('close during credential persistence waits for both rotated tokens and repo
   const accessToken = fakeToken();
   const refreshToken = fakeToken();
   const events: unknown[] = [];
+  const before = Date.now();
   const tokenUrl = await mockOAuth(t, (_request, response) => {
-    response.end(JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, expires_in: 3600 }));
+    response.end(JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, expires_in: 3600, scope: 'user:inference', refresh_token_expires_in: 172800 }));
   });
   const current = provider(t, { path, tokenUrl, clientId: 'test-client', onEvent: (event) => events.push(event) });
 
@@ -329,6 +440,9 @@ test('close during credential persistence waits for both rotated tokens and repo
   const saved = await readCredentials(path);
   assert.equal(saved.claudeAiOauth.accessToken, accessToken);
   assert.equal(saved.claudeAiOauth.refreshToken, refreshToken);
+  assert.deepEqual(saved.claudeAiOauth.scopes, ['user:inference']);
+  assert.ok(saved.claudeAiOauth.refreshTokenExpiresAt! >= before + 172800000);
+  assert.ok(saved.claudeAiOauth.refreshTokenExpiresAt! <= Date.now() + 172800000);
   assert.deepEqual(saved.extraTopLevel, initial.extraTopLevel);
   assert.deepEqual(events, [{ event: 'oauth_refresh', status: 'ok' }]);
   assert.deepEqual(await readdir(directory), ['credentials.json']);

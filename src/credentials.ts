@@ -7,11 +7,15 @@ const MAX_CREDENTIAL_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_REFRESH_BEFORE_MS = 5 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 15000;
+const MAX_TIMESTAMP_MS = 8640000000000000;
 
 export interface ClaudeOAuthCredentials extends Record<string, unknown> {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  refreshTokenExpiresAt?: number;
+  scopes?: string[];
+  clientId?: string;
 }
 
 export interface ClaudeCredentials extends Record<string, unknown> {
@@ -33,6 +37,14 @@ function isToken(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 16384 && /^[\x21-\x7e]+$/.test(value);
 }
 
+function isTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_TIMESTAMP_MS;
+}
+
+function isScope(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 16384 && /^[\x21\x23-\x5b\x5d-\x7e]+$/.test(value);
+}
+
 function parseCredentials(serialized: string): ClaudeCredentials {
   let value: unknown;
   try {
@@ -42,11 +54,41 @@ function parseCredentials(serialized: string): ClaudeCredentials {
   }
   const oauth = isObject(value) ? value.claudeAiOauth : undefined;
   if (!isObject(value) || !isObject(oauth) || !isToken(oauth.accessToken) || !isToken(oauth.refreshToken)
-    || typeof oauth.expiresAt !== 'number' || !Number.isSafeInteger(oauth.expiresAt) || oauth.expiresAt < 0
-    || oauth.expiresAt > 8640000000000000) {
+    || !isTimestamp(oauth.expiresAt)
+    || (oauth.refreshTokenExpiresAt !== undefined && !isTimestamp(oauth.refreshTokenExpiresAt))
+    || (oauth.clientId !== undefined && !isToken(oauth.clientId))
+    || (oauth.scopes !== undefined && (!Array.isArray(oauth.scopes) || !oauth.scopes.every(isScope)))) {
     throw new CredentialError('The relay Claude credential file has invalid or missing OAuth fields.');
   }
   return value as ClaudeCredentials;
+}
+
+function parseRefreshResponse(value: unknown, previous: ClaudeOAuthCredentials): ClaudeOAuthCredentials {
+  const invalid = () => new CredentialError('Claude OAuth refresh returned invalid credentials.');
+  if (!isObject(value) || !isToken(value.access_token)
+    || (value.refresh_token !== undefined && !isToken(value.refresh_token))) throw invalid();
+  const now = Date.now();
+  const expiresAt = typeof value.expires_in === 'number' ? Math.floor(now + value.expires_in * 1000) : NaN;
+  if (!isTimestamp(expiresAt) || expiresAt <= now) throw invalid();
+  const updated: ClaudeOAuthCredentials = {
+    ...previous,
+    accessToken: value.access_token,
+    refreshToken: value.refresh_token === undefined ? previous.refreshToken : value.refresh_token,
+    expiresAt,
+  };
+  if (value.scope !== undefined) {
+    if (typeof value.scope !== 'string') throw invalid();
+    const scopes = value.scope.split(' ').filter(Boolean);
+    if (!scopes.every(isScope)) throw invalid();
+    updated.scopes = scopes;
+  }
+  if (value.refresh_token_expires_in !== undefined) {
+    const lifetime = value.refresh_token_expires_in;
+    const refreshExpiresAt = typeof lifetime === 'number' ? Math.floor(now + lifetime * 1000) : NaN;
+    if (typeof lifetime !== 'number' || lifetime < 0 || !isTimestamp(refreshExpiresAt)) throw invalid();
+    updated.refreshTokenExpiresAt = refreshExpiresAt;
+  }
+  return updated;
 }
 
 async function readSnapshot(path: string): Promise<{ credentials: ClaudeCredentials; serialized: string }> {
@@ -171,13 +213,15 @@ export function createCredentialProvider(options: CredentialProviderOptions): Cr
     timeout.unref();
     let persisted = false;
     try {
+      const previous = snapshot.credentials.claudeAiOauth;
       const response = await request(tokenUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
         body: JSON.stringify({
           grant_type: 'refresh_token',
-          refresh_token: snapshot.credentials.claudeAiOauth.refreshToken,
-          client_id: options.clientId,
+          refresh_token: previous.refreshToken,
+          client_id: previous.clientId ?? options.clientId,
+          ...(previous.scopes?.length ? { scope: previous.scopes.join(' ') } : {}),
         }),
         signal: controller.signal,
         dispatcher: agent,
@@ -205,25 +249,14 @@ export function createCredentialProvider(options: CredentialProviderOptions): Cr
       } finally {
         response.body.destroy();
       }
-      const expiresAt = isObject(value) && typeof value.expires_in === 'number'
-        ? Math.floor(Date.now() + value.expires_in * 1000) : NaN;
-      if (!isObject(value) || !isToken(value.access_token) || !isToken(value.refresh_token)
-        || typeof value.expires_in !== 'number' || value.expires_in <= 0
-        || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || expiresAt > 8640000000000000) {
-        throw new CredentialError('Claude OAuth refresh returned invalid credentials.');
-      }
-      // OAuth has rotated the refresh token. Cancellation may stop the request
-      // from using it, but must not discard this now-required credential commit.
+      const oauth = parseRefreshResponse(value, previous);
+      // A valid response may rotate the refresh token. Cancellation must not
+      // discard the credential commit even if the request cannot use it.
       clearTimeout(timeout);
       if (refreshAbort === controller) refreshAbort = undefined;
       const updated: ClaudeCredentials = {
         ...snapshot.credentials,
-        claudeAiOauth: {
-          ...snapshot.credentials.claudeAiOauth,
-          accessToken: value.access_token,
-          refreshToken: value.refresh_token,
-          expiresAt,
-        },
+        claudeAiOauth: oauth,
       };
       await persistCredentials(options.path, snapshot.serialized, updated);
       persisted = true;
