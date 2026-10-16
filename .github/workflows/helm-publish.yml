@@ -1,0 +1,132 @@
+name: Publish Helm chart
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm/**'
+      - 'scripts/helm-*.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/helm-publish.yml'
+  pull_request:
+    paths:
+      - 'helm/**'
+      - 'scripts/helm-*.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/helm-publish.yml'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish from main (disable to validate only)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-${{ github.event_name == 'pull_request' && github.ref || 'gh-pages-publish' }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Validate Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.1
+      - run: npm ci
+      - run: npm run test:helm
+
+  publish:
+    name: Publish Helm repository to Pages
+    needs: check
+    if: github.repository == 'kr4t0n/cchop' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      PAGES_DIRECTORY: ${{ github.workspace }}/pages
+      REPO_URL: https://kr4t0n.github.io/cchop/helm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.1
+      - run: npm ci
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Load or initialize chart archive branch
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages > /dev/null; then
+            git fetch --depth=1 origin refs/heads/gh-pages:refs/remotes/origin/gh-pages
+            git worktree add --detach "$PAGES_DIRECTORY" refs/remotes/origin/gh-pages
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then exit "$status"; fi
+            git worktree add --detach "$PAGES_DIRECTORY" HEAD
+            git -C "$PAGES_DIRECTORY" switch --orphan gh-pages
+          fi
+      - name: Package without overwriting published versions
+        run: |
+          node --import tsx scripts/helm-repository.ts helm/cchop "$PAGES_DIRECTORY" "$REPO_URL"
+          cp helm/index.html "$PAGES_DIRECTORY/index.html"
+          touch "$PAGES_DIRECTORY/.nojekyll"
+      - name: Commit chart archives and index
+        working-directory: ${{ env.PAGES_DIRECTORY }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add helm index.html .nojekyll
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(helm): publish chart from ${GITHUB_SHA::7}"
+            git push origin HEAD:refs/heads/gh-pages
+          fi
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ env.PAGES_DIRECTORY }}
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+      - name: Verify published chart bytes
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          import { parse } from 'yaml';
+
+          const chart = parse(await readFile('helm/cchop/Chart.yaml', 'utf8'));
+          const temporary = await mkdtemp(join(tmpdir(), 'cchop-published-chart-'));
+          try {
+            execFileSync('helm', ['pull', 'cchop', '--repo', process.env.REPO_URL, '--version', chart.version, '--destination', temporary], { stdio: 'inherit' });
+            const [archive] = await readdir(temporary);
+            assert.equal(archive, `cchop-${chart.version}.tgz`);
+            assert.deepEqual(await readFile(join(temporary, archive)), await readFile(join(process.env.PAGES_DIRECTORY, 'helm', archive)));
+            console.log(`Verified public Helm download: cchop ${chart.version}`);
+          } finally {
+            await rm(temporary, { recursive: true, force: true });
+          }
+          NODE

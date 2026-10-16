@@ -1,0 +1,11 @@
+.DS_Store
+.git/
+*.tgz
+*.tmp
+.env
+.env.*
+credentials.env
+.credentials.json
+cchop.json
+fingerprint.json
+claude.settings.json

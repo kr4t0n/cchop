@@ -41,6 +41,7 @@
     "test:package": "node --import tsx scripts/package-smoke.ts",
     "test:browser": "node --import tsx scripts/browser-smoke.ts",
     "test:docker": "node --import tsx scripts/docker-smoke.ts",
+    "test:helm": "node --import tsx scripts/helm-smoke.ts",
     "check": "npm run lint && npm run typecheck && npm run build && npm test",
     "prepack": "npm run build"
   },
@@ -60,6 +61,7 @@
     "jiti": "2.7.0",
     "tsx": "4.23.13",
     "typescript": "6.0.2",
-    "typescript-eslint": "8.70.0"
+    "typescript-eslint": "8.70.0",
+    "yaml": "2.9.1"
   }
 }

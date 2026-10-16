@@ -2,7 +2,7 @@
 
 cchop is a personal Claude Code subscription relay distributed as a global npm CLI. It implements the two-stage design in [the source document](https://bytedance.larkoffice.com/wiki/OkVnw34DTilaLMkaUI5ceE7enbf): capture the remote Claude Code request identity once, then run a relay that rewrites incoming requests and owns the remote OAuth refresh lifecycle. `cchop start` runs the relay and its bundled operations dashboard in one foreground process.
 
-The local client holds only the relay URL and shared relay key. Subscription credentials stay on the relay host. Configuration, captured identity, and secrets live outside the npm installation directory. A Dockerfile bundles both CLIs; hosting and infrastructure configuration belong outside this repository.
+The local client holds only the relay URL and shared relay key. Subscription credentials stay on the relay host. Configuration, captured identity, and secrets live outside the npm installation directory. A Dockerfile bundles both CLIs, and an optional Helm chart deploys one persistent instance. Cluster administration and provider login remain operator responsibilities.
 
 ## Install
 
@@ -87,6 +87,20 @@ chmod 600 ./claude.settings.json
 Substitute your actual relay URL; use `http://127.0.0.1:8787` for a client on the Docker host. Transfer this file privately as described below. The command refuses to overwrite an existing settings file.
 
 `NODE_IMAGE` and `CLAUDE_CODE_VERSION` are build arguments for explicit upgrades. Update the pinned defaults (including the Node digest), rebuild, stop the relay, and repeat the setup shell's capture step with `cchop capture --replace` using the existing volume; do not rerun `init`. Claude's automatic and manual updater commands are disabled with `DISABLE_AUTOUPDATER=1` and `DISABLE_UPDATES=1`, so installed binaries remain part of the image. Never bake login state or cchop secrets into an image. Docker Hub publication uses its own workflow, separate from npm releases.
+
+## Kubernetes with Helm
+
+The [cchop chart](helm/cchop/README.md) follows the Argus chart repository layout:
+
+```bash
+helm repo add cchop https://kr4t0n.github.io/cchop/helm
+helm repo update cchop
+helm show values cchop/cchop --version 0.1.0
+```
+
+The chart pins a published amd64/arm64 image and runs one replica with `Recreate` updates, a retained private home PVC, separate relay/admin Services, and optional independent ingresses. Start a fresh install with `setup.enabled=true` to log in and capture inside the idle pod; Services exclude setup pods. Exit Claude before switching to relay mode. The [operator guide](helm/cchop/README.md#install-and-capture) provides exact rendering, installation, capture, verification, and rollback commands. A [Tailscale example](helm/cchop/examples/values.tailscale.yaml) exposes the relay and dashboard on separate tailnet names.
+
+Automated chart checks and publication never access a cluster. Apply the reviewed manifests yourself; the chart creates only its release's workload, storage claim, Services, and optional ingresses. It does not install an ingress controller, manage the cluster, or automate Claude login.
 
 ## First-time setup on the relay host
 
@@ -246,11 +260,14 @@ npx playwright install chromium
 npm run test:browser
 docker build --pull -t cchop:local .
 npm run test:docker
+npm run test:helm  # requires Helm 3.20+; CI pins 3.22.1
 ```
 
 `npm run check` runs ESLint, server/UI type checks, both builds, and protocol/CLI tests. `npm run test:package` installs the tarball globally into a temporary prefix and exercises the actual installed capture, startup, client, dashboard, streaming, and shutdown flow. It leaves the current tarball in this checkout and removes its temporary installation. Browser checks cover real local service metrics, authentication, polling, filtering, offline behavior, and desktop/mobile layout. An existing Chromium can be selected with `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
 
-`npm run test:docker` checks the built image (or pass another tag with `npm run test:docker -- <image>`): both CLIs, non-root volume ownership, capture, OAuth refresh persistence, request rewriting, bundled dashboard, default startup, and SIGTERM shutdown. It creates and removes a temporary Docker volume and runs containers with networking disabled; mock provider traffic stays on container loopback.
+`npm run test:docker` checks the built image (or pass another tag with `npm run test:docker -- <image>`): both CLIs, non-root volume ownership, capture, OAuth refresh persistence, request rewriting, bundled dashboard, default startup, and SIGTERM shutdown. It creates and removes a temporary Docker volume and runs containers with networking disabled; mock provider traffic stays on container loopback. The containers also use the chart's read-only root filesystem, writable `/tmp`, dropped capabilities, and no privilege escalation.
+
+`npm run test:helm` lints and renders the default, setup, existing-storage/Secret, and Tailscale configurations; checks one-process ownership and setup traffic isolation; rejects invalid values; and tests immutable chart archives and retained version history. It uses temporary local files and no cluster access. The Helm workflow runs these checks on relevant pull requests and before publication.
 
 All automated checks use temporary fake fingerprints, generated test credentials, and loopback API/OAuth servers. They do not read the operator's credential store or make real subscription requests. Successful mock checks establish implementation behavior; live remote login, capture, and provider compatibility still require operator validation. Tests supervise and close their temporary services in the foreground. The CI workflow runs lint, types, tests, builds, and package/browser checks. The Docker Hub workflow also runs application checks and container smoke tests on native amd64 and arm64 runners; relevant pull requests build and test without publishing.
 
@@ -293,6 +310,14 @@ docker run --rm kr4t0n/cchop:main claude --version
 
 Replace `kr4t0n` if a different Docker Hub account is configured. Pulling an image does not initialize state or log in to Claude; reuse the documented setup/capture flow and private home volume. A local image build or a manual build-only run does not establish Docker Hub availability; inspect the publish workflow's manifest verification before announcing a release.
 
+### Helm chart publishing
+
+The [Helm publishing workflow](.github/workflows/helm-publish.yml) publishes chart packages and `index.yaml` to **https://kr4t0n.github.io/cchop/helm**, with version history stored on `gh-pages`. Configure **Settings → Pages → Source: GitHub Actions** once. It uses the repository's `GITHUB_TOKEN`; no additional secret is needed.
+
+Pushes to `main` affecting the chart, its packaging/check scripts, dependencies, or workflow validate and publish. Manual runs can publish from `main` or validate only; pull requests never publish. Bump `helm/cchop/Chart.yaml`'s `version` for every packaged change. Identical republishing preserves the original bytes, changed contents at an existing version fail, and older versions remain downloadable. Chart versioning is separate from npm/Docker releases; update the default image only after its Docker publication succeeds.
+
+Publication serializes writes, creates `gh-pages` when absent, packages without replacing released archives, explicitly deploys a Pages artifact, and verifies a public Helm download against the archived package. It never runs `helm install`, `helm upgrade`, or Kubernetes commands. See the [chart guide](helm/cchop/README.md) for operator deployment and upgrade steps.
+
 ### npm publishing with GitHub Actions
 
 The [Publish to npm workflow](.github/workflows/publish.yml) runs when a stable GitHub release is published. It checks out that release's tag, checks that `v<version>` matches the package and CLI versions, runs lint, types, builds, protocol/CLI tests, and package/browser smoke checks, then publishes the tested tarball with provenance. It verifies that npm serves the same artifact. Prereleases are skipped. Concurrent publishing runs are serialized.
@@ -332,8 +357,11 @@ Run `npm run check`, `npm run test:package`, and `npm run test:browser`. The pac
 | `web/` | React/TypeScript/Tailwind operations dashboard |
 | `test/`, `scripts/` | Protocol/CLI tests and package/browser/Docker smoke checks |
 | `Dockerfile`, `.dockerignore` | Slim Node image with Claude Code and source-built cchop; restricted build context |
+| `helm/cchop/` | Single-instance Helm chart, setup mode, persistence, ingress examples, and operator guide |
+| `scripts/helm-*.ts` | Local chart checks and immutable repository packaging |
 | `.github/workflows/ci.yml` | Application verification |
 | `.github/workflows/docker-publish.yml` | Native amd64/arm64 checks and Docker Hub publication |
+| `.github/workflows/helm-publish.yml` | Chart validation and GitHub Pages repository publication |
 | `.github/workflows/publish.yml` | Stable-release npm publishing and manual validation |
 
-The relay serves messages, token counting, models, and the connection-warming probe. Logs contain request metadata and sanitized capture/refresh diagnostics, never prompts, OAuth tokens, gateway keys, or `metadata.user_id`. Request history is bounded and in memory; restarting clears it. Dashboard credentials stay only in browser memory. No account pooling, credential sharing service, or infrastructure deployment manifests are included.
+The relay serves messages, token counting, models, and the connection-warming probe. Logs contain request metadata and sanitized capture/refresh diagnostics, never prompts, OAuth tokens, gateway keys, or `metadata.user_id`. Request history is bounded and in memory; restarting clears it. Dashboard credentials stay only in browser memory. No account pooling, credential sharing service, or cluster administration is included.
