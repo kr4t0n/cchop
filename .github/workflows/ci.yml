@@ -21,3 +21,5 @@ jobs:
       - run: npm run test:package
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+      - run: docker build --pull --tag cchop:local .
+      - run: npm run test:docker

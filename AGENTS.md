@@ -1,6 +1,6 @@
 # cchop contributor context
 
-cchop is a global npm CLI implementing the source document's personal Claude Code subscription relay: capture a remote request identity once, then rewrite incoming client requests and manage the remote subscription OAuth credentials. The user explicitly requested this architecture, replacing the earlier passthrough proxy. The application and bundled React dashboard run in one foreground process. Infrastructure and container packaging remain outside this repository.
+cchop is a global npm CLI implementing the source document's personal Claude Code subscription relay: capture a remote request identity once, then rewrite incoming client requests and manage the remote subscription OAuth credentials. The user explicitly requested this architecture, replacing the earlier passthrough proxy. The application and bundled React dashboard run in one foreground process. A Dockerfile packages both cchop and Claude Code; infrastructure orchestration remains outside this repository.
 
 ## Architecture
 
@@ -14,7 +14,8 @@ cchop is a global npm CLI implementing the source document's personal Claude Cod
 - `src/server.ts`: independent relay/admin listeners, bounded proxying, streaming, cancellation, lifecycle, and sanitized diagnostics.
 - `src/types.ts`, `src/metrics.ts`: bounded request metadata and dashboard status. `GET /api/status` requires `X-Cchop-Admin-Key`.
 - `web/`: React, TypeScript, Vite, and Tailwind operations dashboard, built into the npm package.
-- `test/`, `scripts/`: local protocol/credential/capture/CLI checks and foreground-supervised package/browser smoke checks. Never read actual user credentials or use real provider tokens in automated tests.
+- `Dockerfile`, `.dockerignore`: multi-stage build from a pinned current Node Debian slim image, compiled cchop with lockfile-installed production dependencies, and a pinned official Claude Code npm installation. Tini supervises the foreground command; runtime uses UID/GID 1000. The build context is allowlisted and excludes secrets and local artifacts.
+- `test/`, `scripts/`: local protocol/credential/capture/CLI checks and foreground-supervised package/browser/Docker smoke checks. Docker checks use a temporary named volume and containers with networking disabled. Never read actual user credentials or use real provider tokens in automated tests.
 - `.github/workflows/publish.yml`: validate a tagged stable GitHub release, publish the tested tarball to npm using OIDC and provenance, and verify registry integrity. Manual workflow dispatch performs validation and a dry run only.
 
 ## Required mechanism
@@ -33,6 +34,7 @@ cchop is a global npm CLI implementing the source document's personal Claude Cod
 
 - TypeScript, ESM, explicit `.js` extensions for server imports; exact dependency versions and lockfile.
 - Run ESLint, type checks, build, and meaningful tests after changing code. Run package/browser checks when their paths or contracts change.
+- Run `docker build --pull -t cchop:local .` and `npm run test:docker` after changing container packaging; CI runs both. Keep Node's version/digest and Claude Code's version explicit. Container publication is not part of the npm release workflow.
 - Update README and this architecture description with behavior and setup changes.
 - Package only compiled application assets and documentation. Keep `.env`, fingerprint.json, Claude credentials, local client settings, npm authentication, and local configuration out of git and package tarballs.
 - Publishing the npm package requires explicit user authorization. The release workflow treats publication of a stable GitHub release as authorization to publish its matching npm version; pushes and manual validation runs do not publish.
@@ -41,6 +43,8 @@ cchop is a global npm CLI implementing the source document's personal Claude Cod
 
 ## Gotchas and limits
 
+- Docker persists the entire `/home/node` volume, including Claude's `.claude.json` and `.claude/` and cchop's `.config/cchop/`. Executables stay outside that volume, so rebuilds replace binaries without replacing login state. Bind mounts must be writable by UID/GID 1000. Do not mount the operator's home or run multiple credential writers.
+- Docker overrides relay/admin binds to `0.0.0.0`; restrict published host ports explicitly, especially administration. Capture remains loopback-only and Claude must run in the same container. Use a setup shell as the container's main process during capture so its completion does not kill the interactive Claude client. Exit Claude and the setup shell before starting the relay. Automatic/manual Claude updates are disabled; rebuild and explicitly recapture after upgrades. Allow more than `shutdownGraceMs` when configuring Docker's stop timeout.
 - Default Claude credential storage follows the document's Linux JSON format. Keychain extraction is not implemented. A custom CLAUDE_CONFIG_DIR must be reflected in cchop's explicit credential path.
 - Capture exits after its first selected exchange, including provider errors; saving a fingerprint does not establish successful provider authentication. A non-successful captured exchange is reported by the CLI.
 - Align the relay Node major version with capture. The stored version describes cchop's capture process, not a verified match to the Claude executable's embedded TLS stack. No guarantee of TLS equivalence or account-enforcement outcomes is made.

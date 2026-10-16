@@ -2,7 +2,7 @@
 
 cchop is a personal Claude Code subscription relay distributed as a global npm CLI. It implements the two-stage design in [the source document](https://bytedance.larkoffice.com/wiki/OkVnw34DTilaLMkaUI5ceE7enbf): capture the remote Claude Code request identity once, then run a relay that rewrites incoming requests and owns the remote OAuth refresh lifecycle. `cchop start` runs the relay and its bundled operations dashboard in one foreground process.
 
-The local client holds only the relay URL and shared relay key. Subscription credentials stay on the relay host. Configuration, captured identity, and secrets live outside the npm installation directory. Hosting and infrastructure configuration belong outside this repository.
+The local client holds only the relay URL and shared relay key. Subscription credentials stay on the relay host. Configuration, captured identity, and secrets live outside the npm installation directory. A Dockerfile bundles both CLIs; hosting and infrastructure configuration belong outside this repository.
 
 ## Install
 
@@ -23,6 +23,70 @@ npm run check
 npm pack
 npm install -g ./cchop-0.1.0.tgz
 ```
+
+## Docker
+
+Build from this checkout, including the bundled dashboard:
+
+```bash
+docker build --pull -t cchop:local .
+docker run --rm cchop:local cchop --version
+docker run --rm cchop:local claude --version
+```
+
+The [Dockerfile](Dockerfile) pins the current [official Node slim image](https://hub.docker.com/_/node) at Node **26.12.0**, Debian trixie, with its multi-platform digest, and installs Claude Code **2.1.301** from [Anthropic's npm package](https://code.claude.com/docs/en/setup#install-with-npm). cchop is compiled from the checkout with locked production dependencies. Build tools and source code stay out of the final image. Claude Code limits supported Linux architectures to amd64 and arm64; the smoke check runs on amd64.
+
+The image runs as `node` (UID/GID 1000) and defaults to `cchop start`, with Tini forwarding shutdown signals. Mount a named volume at **`/home/node`** for Claude's `.claude/` and `.claude.json`, plus cchop's `.config/cchop/`. Keep that entire volume private. For a bind mount instead, prepare an empty directory writable by UID/GID 1000; do not mount your normal home directory. Do not share the volume between running relay instances or run Claude while the relay owns the credentials.
+
+For first-time setup, start an interactive shell with the persistent volume:
+
+```bash
+docker volume create cchop-home
+docker run --rm -it --name cchop-setup \
+  --mount type=volume,source=cchop-home,target=/home/node \
+  cchop:local bash
+```
+
+Inside that container, initialize and log in, then start capture:
+
+```bash
+cchop init
+claude auth login
+cchop capture
+```
+
+Follow the login URL in your host browser and complete the CLI's prompts. While capture is listening, use a **second host terminal** to run Claude in the same container:
+
+```bash
+docker exec -it cchop-setup env \
+  -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_CUSTOM_HEADERS \
+  ANTHROPIC_BASE_URL=http://127.0.0.1:9999 claude
+```
+
+Send a short message, wait for capture to finish, then exit Claude. Capture remains on container loopback; port 9999 is never published. In the first terminal, run `cchop doctor --offline`, then `exit` to remove the setup container. Its volume remains.
+
+Start the relay in the foreground:
+
+```bash
+docker run --rm --name cchop --stop-timeout 45 \
+  --mount type=volume,source=cchop-home,target=/home/node \
+  -p 127.0.0.1:8787:8787 -p 127.0.0.1:8788:8788 \
+  cchop:local
+```
+
+Both listeners bind `0.0.0.0` **inside** the container via environment overrides; these port mappings restrict access to host loopback. The dashboard is at `http://127.0.0.1:8788`, with its key in `/home/node/.config/cchop/credentials.env`. Configure your own HTTPS ingress for remote relay access. Stop with Ctrl+C or `docker stop cchop`; the 45-second stop timeout allows the default 30-second drain to finish.
+
+To generate and copy private client settings, use another host terminal while the relay is running:
+
+```bash
+docker exec cchop cchop client --url https://cchop.example.com --output /home/node/claude.settings.json
+docker cp cchop:/home/node/claude.settings.json ./claude.settings.json
+chmod 600 ./claude.settings.json
+```
+
+Substitute your actual relay URL; use `http://127.0.0.1:8787` for a client on the Docker host. Transfer this file privately as described below. The command refuses to overwrite an existing settings file.
+
+`NODE_IMAGE` and `CLAUDE_CODE_VERSION` are build arguments for explicit upgrades. Update the pinned defaults (including the Node digest), rebuild, stop the relay, and repeat the setup shell's capture step with `cchop capture --replace` using the existing volume; do not rerun `init`. Claude's automatic and manual updater commands are disabled with `DISABLE_AUTOUPDATER=1` and `DISABLE_UPDATES=1`, so installed binaries remain part of the image. Never bake login state or cchop secrets into an image. Container images are built locally; the npm release workflow does not publish them.
 
 ## First-time setup on the relay host
 
@@ -180,11 +244,15 @@ npm run check
 npm run test:package
 npx playwright install chromium
 npm run test:browser
+docker build --pull -t cchop:local .
+npm run test:docker
 ```
 
 `npm run check` runs ESLint, server/UI type checks, both builds, and protocol/CLI tests. `npm run test:package` installs the tarball globally into a temporary prefix and exercises the actual installed capture, startup, client, dashboard, streaming, and shutdown flow. It leaves the current tarball in this checkout and removes its temporary installation. Browser checks cover real local service metrics, authentication, polling, filtering, offline behavior, and desktop/mobile layout. An existing Chromium can be selected with `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
 
-All automated checks use temporary fake fingerprints, generated test credentials, and loopback API/OAuth servers. They do not read the operator's credential store or make real subscription requests. Successful mock checks establish implementation behavior; live remote login, capture, and provider compatibility still require operator validation. Tests supervise and close their temporary services in the foreground. CI runs lint, types, tests, builds, package checks, and browser checks.
+`npm run test:docker` checks the built image (or pass another tag with `npm run test:docker -- <image>`): both CLIs, non-root volume ownership, capture, OAuth refresh persistence, request rewriting, bundled dashboard, default startup, and SIGTERM shutdown. It creates and removes a temporary Docker volume and runs containers with networking disabled; mock provider traffic stays on container loopback.
+
+All automated checks use temporary fake fingerprints, generated test credentials, and loopback API/OAuth servers. They do not read the operator's credential store or make real subscription requests. Successful mock checks establish implementation behavior; live remote login, capture, and provider compatibility still require operator validation. Tests supervise and close their temporary services in the foreground. CI runs lint, types, tests, builds, package/browser checks, and a Docker build and smoke check.
 
 For dashboard development, first build and start cchop, then run `npm run dev --workspace @cchop/web` in another terminal. Vite forwards `/api` to the default local admin port.
 
@@ -229,8 +297,9 @@ Run `npm run check`, `npm run test:package`, and `npm run test:browser`. The pac
 | `src/server.ts`, `src/security.ts` | Relay transport, listener isolation, authentication, header filtering |
 | `src/metrics.ts`, `src/types.ts` | Bounded operational history and dashboard contract |
 | `web/` | React/TypeScript/Tailwind operations dashboard |
-| `test/`, `scripts/` | Protocol/CLI tests and package/browser smoke checks |
+| `test/`, `scripts/` | Protocol/CLI tests and package/browser/Docker smoke checks |
+| `Dockerfile`, `.dockerignore` | Slim Node image with Claude Code and source-built cchop; restricted build context |
 | `.github/workflows/ci.yml` | Application verification |
 | `.github/workflows/publish.yml` | Stable-release npm publishing and manual validation |
 
-The relay serves messages, token counting, models, and the connection-warming probe. Logs contain request metadata and sanitized capture/refresh diagnostics, never prompts, OAuth tokens, gateway keys, or `metadata.user_id`. Request history is bounded and in memory; restarting clears it. Dashboard credentials stay only in browser memory. No account pooling, credential sharing service, deployment manifests, or container packaging are included.
+The relay serves messages, token counting, models, and the connection-warming probe. Logs contain request metadata and sanitized capture/refresh diagnostics, never prompts, OAuth tokens, gateway keys, or `metadata.user_id`. Request history is bounded and in memory; restarting clears it. Dashboard credentials stay only in browser memory. No account pooling, credential sharing service, or infrastructure deployment manifests are included.
