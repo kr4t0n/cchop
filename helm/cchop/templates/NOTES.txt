@@ -1,0 +1,16 @@
+{{- if .Values.setup.enabled }}
+Setup mode: the single pod is idle and excluded from both Services.
+Initialize, log in, and capture inside this pod using the chart README.
+Exit Claude before upgrading with setup.enabled=false to start the relay.
+{{- else }}
+cchop requires initialized configuration, a captured fingerprint, and Claude
+credentials on its home PVC. For a new volume, use setup.enabled=true first.
+{{- end }}
+
+Deployment: {{ include "cchop.fullname" . }}
+Private home PVC: {{ include "cchop.claim" . }}
+Relay Service: {{ include "cchop.fullname" . }}-relay:{{ .Values.service.relay.port }}
+Dashboard Service: {{ include "cchop.fullname" . }}-admin:{{ .Values.service.admin.port }}
+
+One process owns the credentials. Never scale above one replica or run a
+second release against this PVC. Chart-created PVCs are retained on uninstall.

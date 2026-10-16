@@ -1,0 +1,17 @@
+# Requires the Tailscale Kubernetes operator and HTTPS in the tailnet.
+# TLS hosts are short tailnet device names; use their full .ts.net URLs in clients.
+ingress:
+  relay:
+    enabled: true
+    className: tailscale
+    host: cchop
+    tls:
+      enabled: true
+      secretName: ""
+  admin:
+    enabled: true
+    className: tailscale
+    host: cchop-admin
+    tls:
+      enabled: true
+      secretName: ""

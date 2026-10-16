@@ -1,0 +1,67 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: docker.io/kr4t0n/cchop
+  # This published build includes identity/OAuth fixes and Claude Code 2.1.301.
+  tag: sha-1db056c
+  digest: sha256:fdd68b7f23a226120ee7772dfeedcd3617fa34351416253c85d900edde7b4444
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+setup:
+  # Hold the sole pod idle for operator login/capture; Services exclude it.
+  enabled: false
+
+persistence:
+  existingClaim: ""
+  size: 1Gi
+  # null uses the default StorageClass; "" requests no StorageClass.
+  storageClass: null
+  accessMode: ReadWriteOnce
+
+auth:
+  # Optional Secret with CCHOP_GATEWAY_TOKEN and CCHOP_ADMIN_TOKEN keys.
+  # Otherwise use the private credentials.env created by cchop init on the PVC.
+  existingSecret: ""
+
+# Overrides the configured public URL only when nonempty.
+publicUrl: ""
+terminationGracePeriodSeconds: 45
+
+service:
+  relay:
+    port: 8787
+    annotations: {}
+  admin:
+    port: 8788
+    annotations: {}
+
+ingress:
+  relay:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    tls:
+      enabled: true
+      secretName: ""
+  admin:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    tls:
+      enabled: true
+      secretName: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

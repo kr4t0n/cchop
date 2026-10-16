@@ -1,0 +1,24 @@
+{{- range $name := list "relay" "admin" }}
+{{- $service := index $.Values.service $name }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cchop.fullname" $ }}-{{ $name }}
+  labels:
+    {{- include "cchop.labels" $ | nindent 4 }}
+  {{- with $service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cchop.selectorLabels" $ | nindent 4 }}
+    cchop.dev/mode: relay
+  ports:
+    - name: http
+      port: {{ $service.port }}
+      targetPort: {{ $name }}
+      protocol: TCP
+{{- end }}

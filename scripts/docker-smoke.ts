@@ -8,6 +8,7 @@ const image = process.argv[2] ?? 'cchop:local';
 const name = `cchop-smoke-${randomUUID()}`;
 const volume = `${name}-home`;
 const mount = `type=volume,source=${volume},target=/home/node`;
+const isolation = ['--read-only', '--tmpfs', '/tmp:rw,nosuid,nodev', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges'];
 let child: ChildProcess | undefined;
 let exited: Promise<number | null> | undefined;
 let output = '';
@@ -16,7 +17,7 @@ async function docker(args: string[]): Promise<string> {
   return (await execute('docker', args, { timeout: 60000, maxBuffer: 1024 * 1024 })).stdout;
 }
 
-const run = (...args: string[]) => docker(['run', '--rm', '--name', name, '--network', 'none', '--mount', mount, image, ...args]);
+const run = (...args: string[]) => docker(['run', '--rm', ...isolation, '--name', name, '--network', 'none', '--mount', mount, image, ...args]);
 const inside = (code: string) => docker(['exec', name, 'node', '--input-type=module', '--eval', code]);
 const common = `
   import assert from 'node:assert/strict';
@@ -32,7 +33,7 @@ const common = `
 
 async function launch(args: string[], ready: string, input?: string): Promise<void> {
   output = '';
-  child = spawn('docker', ['run', '--rm', ...(input ? ['--interactive'] : []), '--network', 'none', '--name', name, '--mount', mount, image, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child = spawn('docker', ['run', '--rm', ...isolation, ...(input ? ['--interactive'] : []), '--network', 'none', '--name', name, '--mount', mount, image, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
   exited = new Promise((resolve, reject) => {
     child!.once('exit', resolve);
     child!.once('error', reject);

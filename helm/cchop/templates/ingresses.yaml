@@ -1,0 +1,42 @@
+{{- range $name := list "relay" "admin" }}
+{{- $ingress := index $.Values.ingress $name }}
+{{- if $ingress.enabled }}
+{{- if and (eq $ingress.className "tailscale") (not $ingress.tls.enabled) }}
+{{- fail "Tailscale ingress requires TLS enabled" }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "cchop.fullname" $ }}-{{ $name }}
+  labels:
+    {{- include "cchop.labels" $ | nindent 4 }}
+  {{- with $ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  rules:
+    - host: {{ required (printf "ingress.%s.host is required when enabled" $name) $ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "cchop.fullname" $ }}-{{ $name }}
+                port:
+                  name: http
+  {{- if $ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $ingress.host | quote }}
+      {{- with $ingress.tls.secretName }}
+      secretName: {{ . | quote }}
+      {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

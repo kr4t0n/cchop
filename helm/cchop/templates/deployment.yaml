@@ -1,0 +1,127 @@
+{{- if and .Values.ingress.relay.enabled .Values.ingress.admin.enabled (eq .Values.ingress.relay.host .Values.ingress.admin.host) }}
+{{- fail "Relay and admin ingresses must use different hosts" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cchop.fullname" . }}
+  labels:
+    {{- include "cchop.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cchop.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cchop.selectorLabels" . | nindent 8 }}
+        cchop.dev/mode: {{ ternary "setup" "relay" .Values.setup.enabled }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: cchop
+          image: {{ include "cchop.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.setup.enabled }}
+          args: ["node", "-e", "setInterval(() => {}, 3600000)"]
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: HOME
+              value: /home/node
+            - name: CCHOP_CONFIG
+              value: /home/node/.config/cchop/cchop.json
+            - name: CCHOP_HOST
+              value: "0.0.0.0"
+            - name: CCHOP_ADMIN_HOST
+              value: "0.0.0.0"
+            - name: CCHOP_PORT
+              value: "8787"
+            - name: CCHOP_ADMIN_PORT
+              value: "8788"
+            {{- with .Values.publicUrl }}
+            - name: CCHOP_PUBLIC_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.auth.existingSecret }}
+            {{- range list "CCHOP_GATEWAY_TOKEN" "CCHOP_ADMIN_TOKEN" }}
+            - name: {{ . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.auth.existingSecret | quote }}
+                  key: {{ . }}
+            {{- end }}
+            {{- end }}
+          {{- if not .Values.setup.enabled }}
+          ports:
+            - name: relay
+              containerPort: 8787
+            - name: admin
+              containerPort: 8788
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: relay
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: relay
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: relay
+            periodSeconds: 10
+            failureThreshold: 6
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: home
+              mountPath: /home/node
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: {{ include "cchop.claim" . }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
