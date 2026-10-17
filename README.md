@@ -95,10 +95,10 @@ The [cchop chart](helm/cchop/README.md) follows the Argus chart repository layou
 ```bash
 helm repo add cchop https://kr4t0n.github.io/cchop/helm
 helm repo update cchop
-helm show values cchop/cchop --version 0.1.0
+helm show values cchop/cchop --version 0.1.1
 ```
 
-The chart pins a published amd64/arm64 image and runs one replica with `Recreate` updates, a retained private home PVC, separate relay/admin Services, and optional independent ingresses. Start a fresh install with `setup.enabled=true` to log in and capture inside the idle pod; Services exclude setup pods. Exit Claude before switching to relay mode. The [operator guide](helm/cchop/README.md#install-and-capture) provides exact rendering, installation, capture, verification, and rollback commands. A [Tailscale example](helm/cchop/examples/values.tailscale.yaml) exposes the relay and dashboard on separate tailnet names.
+Chart **0.1.1** pins the published cchop **0.1.1** amd64/arm64 image, including the subscription usage endpoint. It runs one replica with `Recreate` updates, a retained private home PVC, separate relay/admin Services, and optional independent ingresses. Start a fresh install with `setup.enabled=true` to log in and capture inside the idle pod; Services exclude setup pods. Exit Claude before switching to relay mode. The [operator guide](helm/cchop/README.md#install-and-capture) provides exact rendering, installation, capture, verification, and rollback commands. A [Tailscale example](helm/cchop/examples/values.tailscale.yaml) exposes the relay and dashboard on separate tailnet names.
 
 Automated chart checks and publication never access a cluster. Apply the reviewed manifests yourself; the chart creates only its release's workload, storage claim, Services, and optional ingresses. It does not install an ingress controller, manage the cluster, or automate Claude login.
 
