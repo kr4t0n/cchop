@@ -2,8 +2,28 @@ apiVersion: v1
 entries:
   cchop:
   - apiVersion: v2
+    appVersion: 0.1.2
+    created: "2026-10-17T14:37:32.043363672Z"
+    description: Personal Claude Code subscription relay and operations dashboard
+    digest: 1cb67e9b35f2a7c2b48d386fcef177a257826fe23f9073c591951df312d260fa
+    home: https://github.com/kr4t0n/cchop
+    keywords:
+    - claude-code
+    - relay
+    kubeVersion: '>=1.25.0-0'
+    maintainers:
+    - name: kr4t0n
+      url: https://github.com/kr4t0n
+    name: cchop
+    sources:
+    - https://github.com/kr4t0n/cchop
+    type: application
+    urls:
+    - https://kr4t0n.github.io/cchop/helm/cchop-0.1.2.tgz
+    version: 0.1.2
+  - apiVersion: v2
     appVersion: 0.1.1
-    created: "2026-10-17T13:47:51.591125036Z"
+    created: "2026-10-17T14:37:32.042844967Z"
     description: Personal Claude Code subscription relay and operations dashboard
     digest: a9c17a9f4cf67ad5a9072dfb909ff212530131d1bdce00272f6865df96634f04
     home: https://github.com/kr4t0n/cchop
@@ -23,7 +43,7 @@ entries:
     version: 0.1.1
   - apiVersion: v2
     appVersion: 0.1.0
-    created: "2026-10-17T13:47:51.59062389Z"
+    created: "2026-10-17T14:37:32.042327974Z"
     description: Personal Claude Code subscription relay and operations dashboard
     digest: 45f48442c5819cbce32c428edfef28a8d48406e8530e1439629a79cf1ea5f060
     home: https://github.com/kr4t0n/cchop
@@ -41,4 +61,4 @@ entries:
     urls:
     - https://kr4t0n.github.io/cchop/helm/cchop-0.1.0.tgz
     version: 0.1.0
-generated: "2026-10-17T13:47:51.589964488Z"
+generated: "2026-10-17T14:37:32.041707099Z"
