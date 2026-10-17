@@ -20,7 +20,6 @@ const routes = new Map([
   ['/v1/messages', 'POST'],
   ['/v1/messages/count_tokens', 'POST'],
   ['/v1/models', 'GET'],
-  ['/api/oauth/usage', 'GET'],
 ]);
 
 class HttpError extends Error {
