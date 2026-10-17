@@ -1,6 +1,6 @@
 {
   "name": "cchop",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A self-hosted Claude Code relay with one command to start the service and operations dashboard.",
   "type": "module",
   "license": "UNLICENSED",
