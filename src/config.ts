@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { z } from 'zod';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 
 function isOrigin(value: string): boolean {
   try {
