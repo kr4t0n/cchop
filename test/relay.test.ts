@@ -73,6 +73,7 @@ test('relay rejects unauthenticated, unsupported, duplicate, and oversized reque
   assert.equal((await fetch(`${f.base}/v1/messages`, { method: 'POST', headers: { authorization: `Bearer ${f.oauth.accessToken}` }, body: '{}' })).status, 401);
   assert.equal((await fetch(`${f.base}/v1/messages`, { headers: f.auth })).status, 405);
   assert.equal((await fetch(`${f.base}/unknown?token=private`, { headers: f.auth })).status, 404);
+  assert.equal((await fetch(`${f.base}/api/oauth/usage`, { headers: f.auth })).status, 404);
   assert.equal((await fetch(`${f.base}/v1/messages`, { method: 'POST', headers: f.auth, body: 'a'.repeat(1025) })).status, 413);
   assert.equal((await fetch(`${f.base}/api/status`, { headers: f.auth })).status, 404);
   const duplicateStatus = await new Promise<number>((resolveStatus, reject) => {
@@ -132,135 +133,6 @@ test('replaces client identity and bearer authorization with the captured remote
   const logs = JSON.stringify([f.logs, f.events]);
   for (const sensitive of [body, 'private prompt', ...Object.values(capturedIdentity.identity), 'original-session', f.oauth.accessToken, f.oauth.refreshToken, f.config.gatewayToken, f.config.adminToken]) assert.equal(logs.includes(sensitive), false);
   assert.equal(f.logs[0]?.path, '/v1/messages');
-});
-
-test('usage requires the relay key and GET before accessing OAuth or upstream', async (t) => {
-  let calls = 0;
-  const f = await fixture(t, (_req, res) => { calls += 1; res.end('{}'); });
-  await writeFile(f.config.claudeCredentialsPath, JSON.stringify({ claudeAiOauth: { ...f.oauth, expiresAt: 0 } }), { mode: 0o600 });
-  for (const token of [undefined, f.config.adminToken, f.oauth.accessToken]) {
-    const response = await fetch(`${f.base}/api/oauth/usage`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-    });
-    assert.equal(response.status, 401);
-    await response.text();
-  }
-  const wrongMethod = await fetch(`${f.base}/api/oauth/usage`, { method: 'POST', headers: f.auth, body: '{}' });
-  assert.equal(wrongMethod.status, 405);
-  assert.equal(wrongMethod.headers.get('allow'), 'GET');
-  await wrongMethod.text();
-  const duplicateStatus = await new Promise<number>((resolveStatus, reject) => {
-    const req = httpRequest(`${f.base}/api/oauth/usage`, {
-      headers: ['Authorization', f.auth.authorization, 'Authorization', f.auth.authorization],
-    }, (res) => { res.resume(); resolveStatus(res.statusCode!); });
-    req.on('error', reject);
-    req.end();
-  });
-  assert.equal(duplicateStatus, 400);
-  const unrelated = await fetch(`${f.base}/api/oauth/profile`, { headers: f.auth });
-  assert.equal(unrelated.status, 404);
-  await unrelated.text();
-  const admin = await fetch(`${f.admin}/api/oauth/usage`, { headers: { 'x-cchop-admin-key': f.config.adminToken } });
-  assert.equal(admin.status, 404);
-  await admin.text();
-  assert.equal(calls, 0);
-});
-
-test('usage forwards queries, remote credentials, quota data, and provider errors without caching or retries', async (t) => {
-  const payload = '{ "five_hour": { "utilization": 23.5, "resets_at": "2026-10-17T15:00:00Z" }, "seven_day": null, "future_quota": { "detail": "private-quota-data" } }';
-  const providerError = '{ "error": { "type": "provider_error", "message": "private-provider-detail" } }';
-  const query = '?at_wall=1&skip_spend=1&future=private-query';
-  const received: { req: IncomingMessage; body: string }[] = [];
-  let status = 200;
-  const f = await fixture(t, (req, res) => {
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (chunk: string) => { body += chunk; });
-    req.on('end', () => {
-      received.push({ req, body });
-      res.writeHead(status, {
-        'content-type': 'application/json', 'cache-control': 'no-store',
-        'request-id': 'usage-request', 'set-cookie': 'private-provider-cookie=value',
-        ...(status === 429 ? { 'retry-after': '30' } : {}),
-      });
-      res.end(status === 200 ? payload : providerError);
-    });
-  });
-  for (const code of [200, 401, 403, 429, 503]) {
-    status = code;
-    const response = await fetch(`${f.base}/api/oauth/usage${query}`, { headers: {
-      authorization: f.auth.authorization, 'anthropic-beta': 'local-beta',
-      cookie: 'private-client-cookie=value', 'x-api-key': secret(), 'x-cchop-admin-key': f.config.adminToken,
-    } });
-    assert.equal(response.status, code);
-    assert.equal(await response.text(), code === 200 ? payload : providerError);
-    assert.equal(response.headers.get('content-type'), 'application/json');
-    assert.equal(response.headers.get('cache-control'), 'no-store');
-    assert.equal(response.headers.get('request-id'), 'usage-request');
-    assert.equal(response.headers.get('set-cookie'), null);
-    assert.equal(response.headers.get('retry-after'), code === 429 ? '30' : null);
-  }
-  assert.equal(received.length, 5);
-  for (const { req, body } of received) {
-    assert.equal(req.method, 'GET');
-    assert.equal(req.url, `/api/oauth/usage${query}`);
-    assert.equal(body, '');
-    assert.equal(req.headers.authorization, `Bearer ${f.oauth.accessToken}`);
-    for (const [name, value] of Object.entries(capturedIdentity.headers)) assert.equal(req.headers[name], value);
-    for (const name of ['cookie', 'x-api-key', 'x-cchop-admin-key']) assert.equal(req.headers[name], undefined);
-  }
-  await nextTurn();
-  assert.deepEqual(f.logs.map(({ path, status }) => ({ path, status })), [200, 401, 403, 429, 503].map((status) => ({ path: '/api/oauth/usage', status })));
-  const history = JSON.stringify([f.logs, f.events, f.app.metrics.snapshot(f.config, f.app.relayPort)]);
-  for (const sensitive of ['private-', f.config.gatewayToken, f.config.adminToken, f.oauth.accessToken, f.oauth.refreshToken]) {
-    assert.equal(history.includes(sensitive), false);
-  }
-});
-
-test('usage refreshes and persists remote OAuth credentials, and fails closed when refresh fails', async (t) => {
-  const refreshedToken = secret();
-  let refreshes = 0;
-  let usageCalls = 0;
-  let authorization: string | undefined;
-  let storedAtUsage: string | undefined;
-  let failRefresh = false;
-  const f = await fixture(t, async (req, res) => {
-    if (req.url === '/oauth/token') {
-      refreshes += 1;
-      res.writeHead(failRefresh ? 400 : 200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(failRefresh
-        ? { error: 'invalid_grant', error_description: 'private-refresh-detail' }
-        : { access_token: refreshedToken, expires_in: 3600 }));
-    } else {
-      usageCalls += 1;
-      authorization = req.headers.authorization;
-      storedAtUsage = await readFile(f.config.claudeCredentialsPath, 'utf8');
-      res.end('{"five_hour":null}');
-    }
-  });
-  const expired = JSON.stringify({ claudeAiOauth: { ...f.oauth, expiresAt: 0 } });
-  await writeFile(f.config.claudeCredentialsPath, expired, { mode: 0o600 });
-  const response = await fetch(`${f.base}/api/oauth/usage`, { headers: f.auth });
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { five_hour: null });
-  assert.equal(authorization, `Bearer ${refreshedToken}`);
-  const stored = JSON.parse(storedAtUsage!);
-  assert.equal(stored.claudeAiOauth.accessToken, refreshedToken);
-  assert.equal(stored.claudeAiOauth.refreshToken, f.oauth.refreshToken);
-  assert.ok(stored.claudeAiOauth.expiresAt > Date.now() + 3000000);
-  failRefresh = true;
-  await writeFile(f.config.claudeCredentialsPath, expired, { mode: 0o600 });
-  const failed = await fetch(`${f.base}/api/oauth/usage`, { headers: f.auth });
-  assert.equal(failed.status, 503);
-  const errorBody = await failed.text();
-  assert.equal(refreshes, 2);
-  assert.equal(usageCalls, 1);
-  assert.equal(await readFile(f.config.claudeCredentialsPath, 'utf8'), expired);
-  await nextTurn();
-  const output = `${errorBody}${JSON.stringify([f.logs, f.events])}`;
-  for (const sensitive of ['private-refresh-detail', refreshedToken, f.oauth.accessToken, f.oauth.refreshToken]) {
-    assert.equal(output.includes(sensitive), false);
-  }
 });
 
 test('preserves client sessions, correlation IDs, and current request hints across routes', async (t) => {
@@ -564,14 +436,10 @@ test('redirects cannot send remote OAuth credentials to a different origin', asy
     res.writeHead(307, { location: 'https://other-origin.example/v1/messages' });
     res.end();
   });
-  for (const path of ['/v1/messages', '/api/oauth/usage']) {
-    const response = await fetch(`${f.base}${path}`, {
-      headers: f.auth, ...(path === '/v1/messages' ? { method: 'POST', body: '{}' } : {}),
-    });
-    assert.equal(response.status, 502);
-    assert.equal(response.headers.get('location'), null);
-    assert.match(await response.text(), /redirects are not accepted/);
-  }
+  const response = await fetch(`${f.base}/v1/messages`, { method: 'POST', headers: f.auth, body: '{}' });
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get('location'), null);
+  assert.match(await response.text(), /redirects are not accepted/);
 });
 
 test('an upstream stream failure is recorded as a relay failure, not a client cancellation', { timeout: 5000 }, async (t) => {

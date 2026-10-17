@@ -92,7 +92,7 @@ try {
   await execute('npm', ['install', '--global', '--prefix', prefix, '--ignore-scripts', tarball], { cwd: directory, env, timeout: 120000 });
   const binary = process.platform === 'win32' ? join(prefix, 'cchop.cmd') : join(prefix, 'bin', 'cchop');
   const version = await execute(binary, ['--version'], { cwd: directory, env });
-  assert.equal(version.stdout.trim(), '0.1.1');
+  assert.equal(version.stdout.trim(), '0.1.2');
   const relayPort = await availablePort();
   let adminPort = await availablePort();
   while (adminPort === relayPort) adminPort = await availablePort();

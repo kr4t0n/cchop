@@ -21,7 +21,7 @@ Installation does not start services or modify Claude credentials. To install fr
 npm ci
 npm run check
 npm pack
-npm install -g ./cchop-0.1.1.tgz
+npm install -g ./cchop-0.1.2.tgz
 ```
 
 ## Docker
@@ -98,7 +98,7 @@ helm repo update cchop
 helm show values cchop/cchop --version 0.1.1
 ```
 
-Chart **0.1.1** pins the published cchop **0.1.1** amd64/arm64 image, including the subscription usage endpoint. It runs one replica with `Recreate` updates, a retained private home PVC, separate relay/admin Services, and optional independent ingresses. Start a fresh install with `setup.enabled=true` to log in and capture inside the idle pod; Services exclude setup pods. Exit Claude before switching to relay mode. The [operator guide](helm/cchop/README.md#install-and-capture) provides exact rendering, installation, capture, verification, and rollback commands. A [Tailscale example](helm/cchop/examples/values.tailscale.yaml) exposes the relay and dashboard on separate tailnet names.
+Chart **0.1.1** pins the published cchop **0.1.1** amd64/arm64 image. It runs one replica with `Recreate` updates, a retained private home PVC, separate relay/admin Services, and optional independent ingresses. Start a fresh install with `setup.enabled=true` to log in and capture inside the idle pod; Services exclude setup pods. Exit Claude before switching to relay mode. The [operator guide](helm/cchop/README.md#install-and-capture) provides exact rendering, installation, capture, verification, and rollback commands. A [Tailscale example](helm/cchop/examples/values.tailscale.yaml) exposes the relay and dashboard on separate tailnet names.
 
 Automated chart checks and publication never access a cluster. Apply the reviewed manifests yourself; the chart creates only its release's workload, storage claim, Services, and optional ingresses. It does not install an ingress controller, manage the cluster, or automate Claude login.
 
@@ -171,19 +171,6 @@ The file sets exactly `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. The latte
 The settings file is owner-only and is never silently overwritten. Existing Claude settings are not edited. Remove conflicting API-key, custom-header, or alternate-provider overrides from your client setup. A base URL controls supported API requests; login and auxiliary network endpoints may be separate.
 
 `cchop start` stays in the foreground. Ctrl+C or SIGTERM stops accepting work, drains active requests until the configured deadline, cancels remaining network work, and closes both listeners. An already-received token rotation finishes its atomic credential commit before exit. Run configuration commands in another terminal while it is active.
-
-### Subscription usage
-
-`GET /api/oauth/usage` on the relay listener forwards to the same path on the configured upstream. Authenticate with the relay bearer key, just as for messages. For example, with the client environment variables set:
-
-```bash
-curl --fail-with-body "$ANTHROPIC_BASE_URL/api/oauth/usage" \
-  -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN"
-```
-
-cchop applies the captured headers and the remote subscription's current OAuth token, refreshing it when needed. Query parameters and the upstream response body pass through unchanged, including quota windows, reset times, and future fields. Provider errors and `Retry-After` pass through; redirects are rejected. Refresh failure returns **503** without querying usage. Usage responses are not cached or retried, so avoid frequent polling. Logs and dashboard history retain request metadata only, never quota response bodies or query values.
-
-This endpoint is available during `cchop start`, not capture or on the admin listener. Claude Code's built-in `/usage` behavior depends on its version and authentication mode; endpoint support alone does not establish that the client will call it or display subscription limits. The dashboard does not yet display quota data.
 
 ## Request mechanism
 
@@ -377,4 +364,4 @@ Run `npm run check`, `npm run test:package`, and `npm run test:browser`. The pac
 | `.github/workflows/helm-publish.yml` | Chart validation and GitHub Pages repository publication |
 | `.github/workflows/publish.yml` | Stable-release npm publishing and manual validation |
 
-The relay serves messages, token counting, models, subscription usage (`GET /api/oauth/usage`), and the connection-warming probe. Logs contain request metadata and sanitized capture/refresh diagnostics, never prompts, OAuth tokens, gateway keys, or `metadata.user_id`. Request history is bounded and in memory; restarting clears it. Dashboard credentials stay only in browser memory. No account pooling, credential sharing service, or cluster administration is included.
+The relay serves messages, token counting, models, and the connection-warming probe. Logs contain request metadata and sanitized capture/refresh diagnostics, never prompts, OAuth tokens, gateway keys, or `metadata.user_id`. Request history is bounded and in memory; restarting clears it. Dashboard credentials stay only in browser memory. No account pooling, credential sharing service, or cluster administration is included.
