@@ -21,7 +21,7 @@ Installation does not start services or modify Claude credentials. To install fr
 npm ci
 npm run check
 npm pack
-npm install -g ./cchop-0.1.2.tgz
+npm install -g ./cchop-0.1.3.tgz
 ```
 
 ## Docker
