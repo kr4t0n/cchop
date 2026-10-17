@@ -2,7 +2,7 @@ apiVersion: v2
 name: cchop
 description: Personal Claude Code subscription relay and operations dashboard
 type: application
-version: 0.1.0
+version: 0.1.4
 appVersion: "0.1.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/kr4t0n/cchop

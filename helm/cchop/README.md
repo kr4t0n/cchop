@@ -2,7 +2,7 @@
 
 Deploys one cchop process with the bundled dashboard and Claude Code. One private PVC mounts the entire `/home/node`, preserving Claude login, OAuth rotation, the capture, cchop configuration, and relay/admin keys. The Deployment uses one replica and `Recreate`; upgrades deliberately interrupt service so two processes do not refresh the same credentials.
 
-The default image is the published `sha-1db056c` build, pinned by its multi-platform digest. `appVersion` describes the CLI version; chart versions are independent. A nonempty `image.digest` takes precedence over `image.tag`. Changing only the tag does not override a digest.
+Chart **0.1.4** deploys cchop **0.1.0** from the published `sha-1db056c` build, pinned by its multi-platform digest. `appVersion` describes the CLI version; chart versions are independent. A nonempty `image.digest` takes precedence over `image.tag`. Changing only the tag does not override a digest.
 
 ## Prerequisites
 
@@ -25,10 +25,10 @@ helm repo update cchop
 First render the proposed resources locally, then install in setup mode:
 
 ```bash
-helm template cchop cchop/cchop --version 0.1.0 \
+helm template cchop cchop/cchop --version 0.1.4 \
   --namespace cchop --set setup.enabled=true > /tmp/cchop-setup.yaml
 
-helm upgrade --install cchop cchop/cchop --version 0.1.0 \
+helm upgrade --install cchop cchop/cchop --version 0.1.4 \
   --namespace cchop --create-namespace --set setup.enabled=true \
   --wait --timeout 5m
 ```
@@ -62,7 +62,7 @@ Send a short message, wait for capture to finish, then exit Claude. The chart ne
 Start the relay using the same release and PVC:
 
 ```bash
-helm upgrade cchop cchop/cchop --version 0.1.0 \
+helm upgrade cchop cchop/cchop --version 0.1.4 \
   --namespace cchop --reuse-values --set setup.enabled=false \
   --wait --timeout 5m
 ```

@@ -95,10 +95,10 @@ The [cchop chart](helm/cchop/README.md) follows the Argus chart repository layou
 ```bash
 helm repo add cchop https://kr4t0n.github.io/cchop/helm
 helm repo update cchop
-helm show values cchop/cchop --version 0.1.0
+helm show values cchop/cchop --version 0.1.4
 ```
 
-The chart pins a published amd64/arm64 image and runs one replica with `Recreate` updates, a retained private home PVC, separate relay/admin Services, and optional independent ingresses. Start a fresh install with `setup.enabled=true` to log in and capture inside the idle pod; Services exclude setup pods. Exit Claude before switching to relay mode. The [operator guide](helm/cchop/README.md#install-and-capture) provides exact rendering, installation, capture, verification, and rollback commands. A [Tailscale example](helm/cchop/examples/values.tailscale.yaml) exposes the relay and dashboard on separate tailnet names.
+Chart **0.1.4** pins the published cchop **0.1.0** amd64/arm64 image and runs one replica with `Recreate` updates, a retained private home PVC, separate relay/admin Services, and optional independent ingresses. Start a fresh install with `setup.enabled=true` to log in and capture inside the idle pod; Services exclude setup pods. Exit Claude before switching to relay mode. The [operator guide](helm/cchop/README.md#install-and-capture) provides exact rendering, installation, capture, verification, and rollback commands. A [Tailscale example](helm/cchop/examples/values.tailscale.yaml) exposes the relay and dashboard on separate tailnet names.
 
 Automated chart checks and publication never access a cluster. Apply the reviewed manifests yourself; the chart creates only its release's workload, storage claim, Services, and optional ingresses. It does not install an ingress controller, manage the cluster, or automate Claude login.
 
@@ -315,6 +315,8 @@ Replace `kr4t0n` if a different Docker Hub account is configured. Pulling an ima
 The [Helm publishing workflow](.github/workflows/helm-publish.yml) publishes chart packages and `index.yaml` to **https://kr4t0n.github.io/cchop/helm**, with version history stored on `gh-pages`. Configure **Settings → Pages → Source: GitHub Actions** once. It uses the repository's `GITHUB_TOKEN`; no additional secret is needed.
 
 Pushes to `main` affecting the chart, its packaging/check scripts, dependencies, or workflow validate and publish. Manual runs can publish from `main` or validate only; pull requests never publish. Bump `helm/cchop/Chart.yaml`'s `version` for every packaged change. Identical republishing preserves the original bytes, changed contents at an existing version fail, and older versions remain downloadable. Chart versioning is separate from npm/Docker releases; update the default image only after its Docker publication succeeds.
+
+For a chart-only release, create an annotated `helm-v<chart version>` tag on the chart commit and push it with `main`. The `main` push triggers chart publication; `v<version>` tags are reserved for matching application versions.
 
 Publication serializes writes, creates `gh-pages` when absent, packages without replacing released archives, explicitly deploys a Pages artifact, and verifies a public Helm download against the archived package. It never runs `helm install`, `helm upgrade`, or Kubernetes commands. See the [chart guide](helm/cchop/README.md) for operator deployment and upgrade steps.
 
