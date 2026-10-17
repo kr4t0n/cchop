@@ -3,9 +3,9 @@ fullnameOverride: ""
 
 image:
   repository: docker.io/kr4t0n/cchop
-  # cchop 0.1.1 and Claude Code 2.1.301.
-  tag: sha-1a06510
-  digest: sha256:506bd638aad1f98132d017a940e5cb961e811b38ab626390ac8440e0a39d7887
+  # cchop 0.1.2 and Claude Code 2.1.301.
+  tag: sha-aa3ce7c
+  digest: sha256:05dfdfad160de7afbc4ff66c1540bed7fe05b0811ba26305dc771208370fd7ad
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
